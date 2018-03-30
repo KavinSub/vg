@@ -28,18 +28,14 @@ using namespace vg;
 using namespace vg::subcommand;
 
 SnarlManager* snarl_manager;
-map<int, vector<Snarl*> > id_map;
+map<int, set<Snarl*> > id_map;
 VG* graph;
 
-void multipath_node_ids(const MultipathAlignment &mp, vector<int> &node_ids){
-	set<int> encountered_ids;
+void multipath_node_ids(const MultipathAlignment &mp, set<int> &nodes){
 	for(int i = 0; i < mp.subpath().size(); i++){
 		for(int j = 0; j < mp.subpath()[i].path().mapping().size(); j++){
-			int node_id = mp.subpath()[i].path().mapping()[j].position().node_id();
-			if(encountered_ids.find(node_id) == encountered_ids.end()){
-				node_ids.push_back(node_id);
-				encountered_ids.insert(node_id);
-			}
+			int node = mp.subpath()[i].path().mapping()[j].position().node_id();
+			nodes.insert(node);
 		}
 	}
 }
@@ -63,13 +59,7 @@ const void snarl_inner(const Snarl* s){
 	unordered_set<Node*> nodes = p.first;
 	for(unordered_set<Node*>::const_iterator it = nodes.begin(); it != nodes.end(); it++){
 		int node_id = (*it) -> id();
-		if(id_map.count(node_id) == 0){
-			vector<Snarl*> snarl_set;
-			snarl_set.push_back((Snarl*) s);
-			id_map[node_id] = snarl_set;
-		}else{
-			id_map[node_id].push_back((Snarl*) s);
-		}
+		id_map[node_id].insert((Snarl*) s);
 	}
 }
 
@@ -86,6 +76,7 @@ int main_sample(int argc, char** argv){
 
 	cout << snarls_name << endl;
 	cout << gamp_name << endl;
+	cout << graph_name << endl;
 
 	// int c;
 	// optind = 2;
@@ -117,6 +108,7 @@ int main_sample(int argc, char** argv){
 	//     }
 	// }
 
+	// Snarl Manager
 	snarl_manager = nullptr;
     if (!snarls_name.empty()) {
         ifstream snarl_stream(snarls_name);
@@ -126,9 +118,9 @@ int main_sample(int argc, char** argv){
         }
         snarl_manager = new SnarlManager(snarl_stream);
     }
-
     cout << "Snarl Manager created." << endl;
 
+    // Multipath Alignments
     vector<MultipathAlignment> mp;
     function<void(MultipathAlignment&)> lambda = [&mp](MultipathAlignment& mp_aln) {
         mp.push_back(mp_aln);
@@ -136,61 +128,46 @@ int main_sample(int argc, char** argv){
     get_input_file(gamp_name, [&](istream& in) {
         stream::for_each(in, lambda);
     });
-
     cout << "Multipath alignments read." << endl;
     cout << "Number of multipath alignments: " << mp.size() << endl;
 
+    // Graph
     get_input_file(graph_name, [&](istream& in){
     	graph = new VG(in);
     });
-
     cout << "Graph read." << endl;
 
+    // Phased Genome
     PhasedGenome p(*snarl_manager);
     cout << "Phased genome constructed." << endl;
 
-    // Map from Multpath alignments to contained node ids
-    map<MultipathAlignment*, vector<int> > mp_map;
+    // map: MultipathAlignments --> nodes
+    map<MultipathAlignment*, set<int> > mp_map;
     for(int i = 0; i < mp.size(); i++){
-    	vector<int> node_ids;
-    	multipath_node_ids(mp[i], node_ids);
-    	mp_map[&mp[i]] = node_ids;
+    	set<int> nodes;
+    	multipath_node_ids(mp[i], nodes);
+    	mp_map[&mp[i]] = nodes;
     }
 
-    // Build map from node ids to snarls
+    // map: nodes --> snarls
     snarl_manager -> for_each_snarl_preorder(snarl_inner);
+    cout << "Constructed nodes to snarls map." << endl;
 
-    cout << "Constructed id to snarl map." << endl;
-
-    // Construct map from snarls to multipath alignment
-    map<Snarl*, vector<MultipathAlignment*> > snarl_map;
+    // map: snarls --> MultipathAlignments
+    map<Snarl*, set<MultipathAlignment*> > snarl_map;
     for(int i = 0; i < mp.size(); i++){
-    	vector<int> node_ids = mp_map[&mp[i]];
-    	unordered_set<Snarl*> encountered_snarls;
-    	for(vector<int>::const_iterator it = node_ids.begin(); it != node_ids.end(); it++){
-    		vector<Snarl*> snarls = id_map[*it];
-    		for(vector<Snarl*>::const_iterator st = snarls.begin(); st != snarls.end(); st++){
-    			if(encountered_snarls.find(*st) == encountered_snarls.end()){
-	    			if(snarl_map.find(*st) == snarl_map.end()){
-	    				vector<MultipathAlignment*> vmp;
-	    				vmp.push_back(&mp[i]);
-	    				snarl_map[*st] = vmp;
-	    			}else{
-	    				snarl_map[*st].push_back(&mp[i]);
-	    			}
-	    			encountered_snarls.insert(*st);
-    			}
-    		}
+    	set<int> nodes = mp_map[&mp[i]];
+    	for(set<int>::const_iterator node = nodes.begin(); node != nodes.end(); node++){
+    		for(set<Snarl*>::const_iterator snarl = id_map[*node].begin(); snarl != id_map[*node].end(); snarl++){
+    			snarl_map[*snarl].insert(&mp[i]);
+    		} 
     	}
     }
-
     cout << "Constructed snarls to multipath map." << endl;
 
-    vector<const Snarl*> snarls = snarl_manager -> children_of(nullptr);
-    int rindex = rand() % snarls.size();
-    Snarl *s = (Snarl*) snarls[rindex];
-
-    cout << snarl_map[s].size() << endl;
+    // vector<const Snarl*> snarls = snarl_manager -> children_of(nullptr);
+    // int rindex = rand() % snarls.size();
+    // Snarl *s = (Snarl*) snarls[rindex];
 
 	return 0;
 }
