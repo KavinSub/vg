@@ -41,10 +41,8 @@ list<Visit> sample_path(Snarl& snarl, HandleGraph* graph){
 
 	while(current != digraph.tail){
 		vector<double> dist = get_distribution(cgraph, digraph, current);
-		default_random_engine generator;
-		uniform_real_distribution<double> distribution(0.0, 1.0);
 
-		double p = distribution(generator);
+		double p = ((double) rand() / (RAND_MAX));
 		double rp = 0.0;
 
 		for(int i = 0; i < digraph.edges[current].size(); i++){
@@ -60,6 +58,77 @@ list<Visit> sample_path(Snarl& snarl, HandleGraph* graph){
 	}
 
 	return path;
+}
+
+list<Visit> random_sequence(SnarlManager* snarl_manager, HandleGraph* graph){
+	list<Visit> sequence;
+	vector<const Snarl*> top_snarls = snarl_manager -> children_of(nullptr);
+
+	for(int i = 0; i < top_snarls.size(); i++){
+		Snarl snarl = *top_snarls[i];
+
+		list<Visit> subsequence = sample_path(snarl, graph);
+
+		DirectedGraph digraph = build_graph(snarl, graph);
+
+		if(i == 0){
+			sequence.insert(sequence.end(), subsequence.begin(), subsequence.end());
+		}else{
+			if(sequence.back() == subsequence.front())
+				sequence.insert(sequence.end(), ++subsequence.begin(), subsequence.end());
+			else
+				sequence.insert(sequence.end(), subsequence.begin(), subsequence.end());
+		}
+	}
+
+	return sequence;
+}
+
+// [NAIVE]
+map<int, list<Visit>::iterator> visit_map(list<Visit> sequence){
+	map<int, list<Visit>::iterator> vmap;
+	
+	for(list<Visit>::iterator it = sequence.begin(); it != sequence.end(); it++){
+		vmap[(*it).node_id()] = it;
+	}
+
+	return vmap;
+}
+
+// [NAIVE] Assumes subsequence refers to snarl represented in genome
+// subsequence should contain both endpoints of snarl
+// construct a new visit map after calling
+void replace_subsequence(list<Visit> &sequence, list<Visit> subsequence){
+	Visit start = subsequence.front();
+	Visit end = subsequence.back();
+
+	typedef list<Visit>::iterator iter;
+	iter first = sequence.begin();
+
+	// Remove the original
+	while(first->node_id() != start.node_id())
+		first++;
+
+	iter last = first;
+	while(last->node_id() != end.node_id())
+		last++;
+	last++;
+
+	sequence.erase(first, last);
+
+	// Insert the new
+	iter position = last;
+	sequence.insert(last, subsequence.begin(), subsequence.end());
+}
+
+// [NAIVE]
+bool in_sequence(Snarl snarl, list<Visit> sequence){
+	list<Visit>::iterator it = sequence.begin();
+
+	while(it != sequence.end() || it->node_id() != snarl.start().node_id())
+		it++;
+
+	return it != sequence.end();
 }
 
 // ********************************************************************************

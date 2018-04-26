@@ -14,5 +14,8 @@ using namespace vg;
 using namespace std;
 
 list<Visit> sample_path(Snarl&, HandleGraph*);
+list<Visit> random_sequence(SnarlManager*, HandleGraph*);
+map<int, list<Visit>::iterator> visit_map(list<Visit>);
+void replace_subsequence(list<Visit>&, list<Visit>);
 
 #endif
