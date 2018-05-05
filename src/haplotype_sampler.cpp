@@ -30,6 +30,11 @@ CountGraph count_forward_paths(DirectedGraph&);
 CountGraph count_reverse_paths(DirectedGraph&);
 CountGraph count_paths(DirectedGraph&);
 vector<double> get_distribution(CountGraph&, DirectedGraph&, int);
+void multipath_node_ids(const MultipathAlignment&, set<int>&);
+map<MultipathAlignment*, set<int>> construct_node_map(vector<MultipathAlignment>&);
+map<int, set<Snarl*>> construct_node_snarl_map(SnarlManager*, VG*);
+map<Snarl*, set<MultipathAlignment*>> construct_snarl_alignment_map(vector<MultipathAlignment>&, map<int, set<Snarl*>>&, map<MultipathAlignment*, set<int>>&);
+
 
 list<Visit> sample_path(Snarl& snarl, HandleGraph* graph){
 	DirectedGraph digraph = build_graph(snarl, graph);
@@ -129,6 +134,20 @@ bool in_sequence(Snarl snarl, list<Visit> sequence){
 		it++;
 
 	return it != sequence.end();
+}
+
+// [NAIVE]
+// Selects a random top level snarl
+Snarl random_snarl(SnarlManager* manager){
+	vector<const Snarl*> snarls = manager -> children_of(nullptr);
+	int index = rand() % snarls.size();
+	return *snarls[index];
+}
+
+map<Snarl*, set<MultipathAlignment*>> construct_snarl_map(SnarlManager* snarl_manager, vector<MultipathAlignment>& mp, VG* graph){
+	map<MultipathAlignment*, set<int>> mp_map = construct_node_map(mp);
+	map<int, set<Snarl*>> id_map = construct_node_snarl_map(snarl_manager, graph);
+	return construct_snarl_alignment_map(mp, id_map, mp_map);
 }
 
 // ********************************************************************************
@@ -329,4 +348,51 @@ vector<double> get_distribution(CountGraph& cgraph, DirectedGraph& digraph, int 
 		dist.push_back(cgraph.count[neighbor]/total);
 
 	return dist;
+}
+
+void multipath_node_ids(const MultipathAlignment &mp, set<int> &nodes){
+	for(int i = 0; i < mp.subpath().size(); i++){
+		for(int j = 0; j < mp.subpath()[i].path().mapping().size(); j++){
+			int node = mp.subpath()[i].path().mapping()[j].position().node_id();
+			nodes.insert(node);
+		}
+	}
+}
+
+map<MultipathAlignment*, set<int>> construct_node_map(vector<MultipathAlignment>& mp){
+	map<MultipathAlignment*, set<int>> mp_map;
+    for(int i = 0; i < mp.size(); i++){
+    	set<int> nodes;
+    	multipath_node_ids(mp[i], nodes);
+    	mp_map[&mp[i]] = nodes;
+    }
+    return mp_map;
+}
+
+map<int, set<Snarl*>> construct_node_snarl_map(SnarlManager* snarl_manager, VG* graph){
+	map<int, set<Snarl*>> id_map;
+
+	snarl_manager -> for_each_snarl_preorder([&](const Snarl* s){
+		pair<unordered_set<Node*>, unordered_set<Edge*>> p = snarl_manager -> deep_contents(s, *graph, true);
+		unordered_set<Node*> nodes = p.first;
+		for(unordered_set<Node*>::const_iterator it = nodes.begin(); it != nodes.end(); it++){
+			int node_id = (*it) -> id();
+			id_map[node_id].insert((Snarl*) s);
+		}
+	});
+
+	return id_map;
+}
+
+map<Snarl*, set<MultipathAlignment*>> construct_snarl_alignment_map(vector<MultipathAlignment>& mp, map<int, set<Snarl*>> &id_map, map<MultipathAlignment*, set<int>> &mp_map){
+	map<Snarl*, set<MultipathAlignment*> > snarl_map;
+	for(int i = 0; i < mp.size(); i++){
+    	set<int> nodes = mp_map[&mp[i]];
+    	for(set<int>::const_iterator node = nodes.begin(); node != nodes.end(); node++){
+    		for(set<Snarl*>::const_iterator snarl = id_map[*node].begin(); snarl != id_map[*node].end(); snarl++){
+    			snarl_map[*snarl].insert(&mp[i]);
+    		} 
+    	}
+    }
+	return snarl_map;
 }

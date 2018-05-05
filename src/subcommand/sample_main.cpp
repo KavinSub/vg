@@ -30,18 +30,6 @@ using namespace std;
 using namespace vg;
 using namespace vg::subcommand;
 
-// SnarlManager* snarl_manager;
-// map<int, set<Snarl*> > id_map;
-// VG* graph;
-
-void multipath_node_ids(const MultipathAlignment &mp, set<int> &nodes){
-	for(int i = 0; i < mp.subpath().size(); i++){
-		for(int j = 0; j < mp.subpath()[i].path().mapping().size(); j++){
-			int node = mp.subpath()[i].path().mapping()[j].position().node_id();
-			nodes.insert(node);
-		}
-	}
-}
 
 void help_sample(char** argv){
 	cerr << "usage: " << argv[0] << " sample [options] .snarls .gamp .vg" << endl
@@ -50,23 +38,6 @@ void help_sample(char** argv){
 	<< "N/A" << endl;
 	// << "	-s, --snarls FILE (required)" << endl;
 }
-
-// const void snarl_inner(const Snarl* s){
-// 	pair<unordered_set<Node*>, unordered_set<Edge*> > p = snarl_manager -> deep_contents(s, *graph, true);
-// 	unordered_set<Node*> nodes = p.first;
-// 	for(unordered_set<Node*>::const_iterator it = nodes.begin(); it != nodes.end(); it++){
-// 		int node_id = (*it) -> id();
-// 		id_map[node_id].insert((Snarl*) s);
-// 	}
-// }
-
-// list<Visit> sequence;
-// bool follow_edges_callback(const handle_t& handle){
-// 	// cout << "this is fun" << endl;
-// 	Visit visit = graph -> to_visit(handle);
-// 	sequence.push_back(visit);
-// 	return true;
-// }
 
 int main_sample(int argc, char** argv){
 
@@ -129,16 +100,16 @@ int main_sample(int argc, char** argv){
     }
     cout << "Constructed Snarl Manager." << endl;
 
- //    // Multipath Alignments
- //    vector<MultipathAlignment> mp;
- //    function<void(MultipathAlignment&)> lambda = [&mp](MultipathAlignment& mp_aln) {
- //        mp.push_back(mp_aln);
- //    };
- //    get_input_file(gamp_name, [&](istream& in) {
- //        stream::for_each(in, lambda);
- //    });
- //    cout << "Constructed Multipath Alignments." << endl;
- //    cout << "Number of multipath alignments: " << mp.size() << endl;
+    // Multipath Alignments
+    vector<MultipathAlignment> mp;
+    function<void(MultipathAlignment&)> lambda = [&mp](MultipathAlignment& mp_aln) {
+        mp.push_back(mp_aln);
+    };
+    get_input_file(gamp_name, [&](istream& in) {
+        stream::for_each(in, lambda);
+    });
+    cout << "Constructed Multipath Alignments." << endl;
+    cout << "Number of multipath alignments: " << mp.size() << endl;
 
     // Graph 
     VG* graph;
@@ -147,142 +118,9 @@ int main_sample(int argc, char** argv){
     });
     cout << "Constructed Graph." << endl;
 
- //    // Phased Genome
- //    PhasedGenome p(*snarl_manager);
- //    cout << "Constructed Phased Genome." << endl;
-
-    // ********************************************************************************
-    // 									Graph testing
-    // ********************************************************************************
-
-	// *** Building the directed graph from a snarl ***
-	// vector<const Snarl*> top_snarls = snarl_manager -> children_of(nullptr);
-	// Snarl snarl = *top_snarls[0];
-
-	// list<Visit> path = sample_path(snarl, graph);
-	// for(Visit v: path){
-	// 	cout << v.node_id() << " ";
-	// }
-	// cout << endl;
-
-    // *** Initial sequence ***
-    // list<Visit> sequence = random_sequence(snarl_manager, graph);
-    // for(Visit v: sequence){
-    // 	cout << v.node_id() << " ";
-    // }
-    // cout << endl;
-
-    // *** Sequence visit map ***
-    // list<Visit> sequence = random_sequence(snarl_manager, graph);
-    // map<int, list<Visit>::iterator> vmap;
-    // cout << sequence.size() << endl;
-
-    // *** Sampling several paths ***
-    // cout << "Sampling 10 random subsequences: ";
-    // for(int i = 0; i < 10; i++){
-    //     list<Visit> subsequence = sample_path(snarl, graph);
-    //     cout << "Subsequence: ";
-    //     for(Visit v: subsequence){
-    //         cout << v.node_id() << " ";
-    //     }
-    //     cout << endl;
-    // }
-
-    // *** Test subsequence replacement ***
-    // vector<const Snarl*> top_snarls = snarl_manager -> children_of(nullptr);
-    // list<Visit> sequence = random_sequence(snarl_manager, graph);
-    // // map<int, list<Visit>::iterator> vmap = visit_map(sequence);
-
-    // Snarl snarl = *top_snarls[0];
-    // list<Visit> subsequence = sample_path(snarl, graph);
-
-
-    // typedef list<Visit>::iterator iter;
-
-    // cout << "Current sequence: ";
-    // iter it = sequence.begin();
-    // for(int i = 0; i < 10; i++){
-    //     cout << (it++)->node_id() << " ";
-    // }
-    // cout << endl;
-
-    // cout << "Subsequence: ";
-    // for(Visit v: subsequence){
-    //     cout << v.node_id() << " ";
-    // }
-    // cout << endl;
-
-    // replace_subsequence(sequence, subsequence);
-    // cout << "New sequence: ";
-    // it = sequence.begin();
-    // for(int i = 0; i < 10; i++){
-    //     cout << (it++)->node_id() << " ";
-    // }
-    // cout << endl;
-
-    // ********************************************************************************
-    // 									Snarl to Multipath map
-    // ********************************************************************************
-    // map<int, set<Snarl*> > id_map;
-    // // map: MultipathAlignments --> nodes
-    // map<MultipathAlignment*, set<int> > mp_map;
-    // for(int i = 0; i < mp.size(); i++){
-    // 	set<int> nodes;
-    // 	multipath_node_ids(mp[i], nodes);
-    // 	mp_map[&mp[i]] = nodes;
-    // }
-
-    // // map: nodes --> snarls
-    // snarl_manager -> for_each_snarl_preorder(snarl_inner);
-    // cout << "Constructed nodes to snarls map." << endl;
-
-    // // map: snarls --> MultipathAlignments
-    // map<Snarl*, set<MultipathAlignment*> > snarl_map;
-    // for(int i = 0; i < mp.size(); i++){
-    // 	set<int> nodes = mp_map[&mp[i]];
-    // 	for(set<int>::const_iterator node = nodes.begin(); node != nodes.end(); node++){
-    // 		for(set<Snarl*>::const_iterator snarl = id_map[*node].begin(); snarl != id_map[*node].end(); snarl++){
-    // 			snarl_map[*snarl].insert(&mp[i]);
-    // 		} 
-    // 	}
-    // }
-    // cout << "Constructed snarls to multipath map." << endl;
-
-    // vector<const Snarl*> top_snarls = snarl_manager -> children_of(nullptr);
-    // typedef vector<const Snarl*>::const_iterator iter;
-
-    // // Snarl snarl = *top_snarls[0];
-    // // Visit start = snarl.start();
-    // // Visit end = snarl.end();
-    // // cout << "Snarl ends: " << start.node_id() << " " << end.node_id() << endl;
-    // // handle_t handle = graph -> get_handle(start.node_id(), false);
-    // // graph -> follow_edges(handle, false, follow_edges_callback);
-    // // cout << "Size of sequence: " << sequence.size() << endl;
-
-    // // Initial Sequence
-    // map<int, list<Visit>::iterator> seqmap;
-    // for(iter it = top_snarls.begin(); it != top_snarls.end(); it++){
-    // 	Snarl snarl = **it;
-    // 	Visit start = snarl.start();
-
-    // 	sequence.push_back(start);
-    // 	handle_t handle = graph -> get_handle(start.node_id(), false);
-    // 	graph -> follow_edges(handle, false, follow_edges_callback);
-
-    // }
-    // Snarl last_snarl = *top_snarls[top_snarls.size() - 1];
-    // Visit end = last_snarl.end();
-    // sequence.push_back(end);
-
-    // // To verify sequence contains no overlaps
-    // // unordered_set<Visit*> unique_visits;
-    // // for(list<Visit>::iterator it = sequence.begin(); it != sequence.end(); it++){
-    // // 	Visit* visit = &(*it);
-    // // 	unique_visits.insert(visit);
-    // // }
-    // // cout << "Size of sequence: " << sequence.size() << endl;
-    // // cout << "Size of unique visits: " << unique_visits.size() << endl;
-
+    // Phased Genome
+    PhasedGenome p(*snarl_manager);
+    cout << "Constructed Phased Genome." << endl;
 
 	return 0;
 }

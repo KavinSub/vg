@@ -17,5 +17,7 @@ list<Visit> sample_path(Snarl&, HandleGraph*);
 list<Visit> random_sequence(SnarlManager*, HandleGraph*);
 map<int, list<Visit>::iterator> visit_map(list<Visit>);
 void replace_subsequence(list<Visit>&, list<Visit>);
+Snarl random_snarl(SnarlManager*);
+map<Snarl*, set<MultipathAlignment*>> construct_snarl_map(SnarlManager*, vector<MultipathAlignment>&, VG*);
 
 #endif
