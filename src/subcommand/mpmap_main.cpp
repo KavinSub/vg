@@ -33,6 +33,8 @@ void help_mpmap(char** argv) {
     << "  -x, --xg-name FILE        use this xg index (required)" << endl
     << "  -g, --gcsa-name FILE      use this GCSA2/LCP index pair (required; both FILE and FILE.lcp)" << endl
     << "  -H, --gbwt-name FILE      use this GBWT haplotype index for population-based MAPQs" << endl
+    << "      --linear-index FILE   use this sublinear Li and Stephens index file for population-based MAPQs" << endl
+    << "      --linear-path PATH    use the given path name as the path that the linear index is against" << endl
     << "input:" << endl
     << "  -f, --fastq FILE          input FASTQ (possibly compressed), can be given twice for paired ends (for stdin use -)" << endl
     << "  -G, --gam-input FILE      input GAM (for stdin, use -)" << endl
@@ -60,7 +62,7 @@ void help_mpmap(char** argv) {
     << "  -Q, --mq-max INT          cap mapping quality estimates at this much [60]" << endl
     << "  -p, --band-padding INT    pad dynamic programming bands in inter-MEM alignment by this much [2]" << endl
     << "  -u, --map-attempts INT    perform (up to) this many mappings per read (0 for no limit) [48]" << endl
-    << "  -O, --max-paths INT       consider (up to) this many paths per alignment when scoring by population consistency [1]" << endl
+    << "  -O, --max-paths INT       consider (up to) this many paths per alignment for population consistency scoring, 0 to disable [10]" << endl
     << "  -M, --max-multimaps INT   report (up to) this many mappings per read [1]" << endl
     << "  -r, --reseed-length INT   reseed SMEMs for internal MEMs if they are at least this long (0 for no reseeding) [28]" << endl
     << "  -W, --reseed-diff FLOAT   require internal MEMs to have length within this much of the SMEM's length [0.45]" << endl
@@ -74,6 +76,7 @@ void help_mpmap(char** argv) {
     << "scoring:" << endl
     << "  -q, --match INT           use this match score [1]" << endl
     << "  -z, --mismatch INT        use this mismatch penalty [4]" << endl
+    << "  --score-matrix FILE       read a 5x5 integer substitution scoring matrix from a file" << endl
     << "  -o, --gap-open INT        use this gap open penalty [6]" << endl
     << "  -y, --gap-extend INT      use this gap extension penalty [1]" << endl
     << "  -L, --full-l-bonus INT    add this score to alignments that use the full length of the read [5]" << endl
@@ -92,9 +95,13 @@ int main_mpmap(int argc, char** argv) {
     }
 
     // initialize parameters with their default options
+    #define OPT_SCORE_MATRIX 1000
+    string matrix_file_name;
     string xg_name;
     string gcsa_name;
     string gbwt_name;
+    string sublinearLS_name;
+    string sublinearLS_ref_path;
     string snarls_name;
     string fastq_name_1;
     string fastq_name_2;
@@ -103,11 +110,14 @@ int main_mpmap(int argc, char** argv) {
     int mismatch_score = default_mismatch;
     int gap_open_score = default_gap_open;
     int gap_extension_score = default_gap_extension;
-    int full_length_bonus = 5;
+    int full_length_bonus = default_full_length_bonus;
     bool interleaved_input = false;
     int snarl_cut_size = 5;
     int max_map_attempts = 48;
-    int population_max_paths = 1;
+    int population_max_paths = 10;
+    // How many distinct single path alignments should we look for in a multipath, for MAPQ?
+    // TODO: create an option.
+    int localization_max_paths = 5;
     int max_rescue_attempts = 32;
     int max_num_mappings = 1;
     int buffer_size = 100;
@@ -148,6 +158,7 @@ int main_mpmap(int argc, char** argv) {
     string sample_name = "";
     string read_group = "";
     bool prefilter_redundant_hits = true;
+    bool precollapse_order_length_hits = true;
     int max_sub_mem_recursion_depth = 1;
     
     int c;
@@ -159,6 +170,8 @@ int main_mpmap(int argc, char** argv) {
             {"xg-name", required_argument, 0, 'x'},
             {"gcsa-name", required_argument, 0, 'g'},
             {"gbwt-name", required_argument, 0, 'H'},
+            {"linear-index", required_argument, 0, 1},
+            {"linear-path", required_argument, 0, 2},
             {"fastq", required_argument, 0, 'f'},
             {"gam-input", required_argument, 0, 'G'},
             {"sample", required_argument, 0, 'N'},
@@ -192,6 +205,7 @@ int main_mpmap(int argc, char** argv) {
             {"prune-exp", required_argument, 0, 'U'},
             {"match", required_argument, 0, 'q'},
             {"mismatch", required_argument, 0, 'z'},
+            {"score-matrix", required_argument, 0, OPT_SCORE_MATRIX},
             {"gap-open", required_argument, 0, 'o'},
             {"gap-extend", required_argument, 0, 'y'},
             {"full-l-bonus", required_argument, 0, 'L'},
@@ -231,6 +245,14 @@ int main_mpmap(int argc, char** argv) {
                 
             case 'H':
                 gbwt_name = optarg;
+                break;
+                
+            case 1: // --linear-index
+                sublinearLS_name = optarg;
+                break;
+            
+            case 2: // --linear-path
+                sublinearLS_ref_path = optarg;
                 break;
                 
             case 'f':
@@ -416,6 +438,14 @@ int main_mpmap(int argc, char** argv) {
                 mismatch_score = atoi(optarg);
                 break;
                 
+            case OPT_SCORE_MATRIX:
+                matrix_file_name = optarg;
+                if (matrix_file_name.empty()) {
+                    cerr << "error:[vg mpmap] Must provide matrix file with --matrix-file." << endl;
+                    exit(1);
+                }
+                break;
+                
             case 'o':
                 gap_open_score = atoi(optarg);
                 break;
@@ -526,13 +556,30 @@ int main_mpmap(int argc, char** argv) {
         exit(1);
     }
     
-    if (population_max_paths < 1) {
-        cerr << "error:[vg mpmap] Maximum number of paths per alignment for population scoring (-O) set to " << population_max_paths << ", must set to a positive integer." << endl;
+    if (population_max_paths < 0) {
+        cerr << "error:[vg mpmap] Maximum number of paths per alignment for population scoring (-O) set to " << population_max_paths << ", must set to a nonnegative integer." << endl;
         exit(1);
     }
     
-    if (population_max_paths != 1 && gbwt_name.empty()) {
-        cerr << "error:[vg mpmap] Maximum number of paths per alignment for population scoring (-O) set when population database (-H) not provided." << endl;
+    if (population_max_paths != 10 && population_max_paths != 0 && gbwt_name.empty() && sublinearLS_name.empty()) {
+        // Don't allow anything but the default or the "disabled" setting without an index.
+        // TODO: This restriction makes neat auto-generation of command line options for different conditions hard.
+        cerr << "error:[vg mpmap] Maximum number of paths per alignment for population scoring (-O) is specified but population database (-H or --linear-index) was not provided." << endl;
+        exit(1);
+    }
+    
+    if (!sublinearLS_name.empty() && !gbwt_name.empty()) {
+        cerr << "error:[vg mpmap] GBWT index (-H) and linear haplotype index (--linear-index) both specified. Only one can be used." << endl;
+        exit(1);
+    }
+    
+    if (!sublinearLS_name.empty() && sublinearLS_ref_path.empty()) {
+        cerr << "error:[vg mpmap] Linear haplotype index (--linear-index) cannot be used without a single reference path (--linear-path)." << endl;
+        exit(1);
+    }
+    
+    if (sublinearLS_name.empty() && !sublinearLS_ref_path.empty()) {
+        cerr << "error:[vg mpmap] Linear haplotype ref path (--linear-path) cannot be used without an index (--linear-index)." << endl;
         exit(1);
     }
     
@@ -605,10 +652,11 @@ int main_mpmap(int argc, char** argv) {
     
     // adjust parameters that produce irrelevant extra work in single path mode
     
-    if (single_path_alignment_mode && population_max_paths == 1) {
+    if (single_path_alignment_mode && population_max_paths == 0) {
         // TODO: I don't like having these constants floating around in two different places, but it's not very risky, just a warning
         if (!snarls_name.empty()) {
             cerr << "warning:[vg mpmap] Snarl file (-s) is ignored in single path mode (-S) without multipath population scoring (-O)." << endl;
+            // TODO: Not true!
         }
         
         if (snarl_cut_size != 5) {
@@ -643,23 +691,32 @@ int main_mpmap(int argc, char** argv) {
     }
     
     ifstream gcsa_stream(gcsa_name);
-    if (!xg_stream) {
+    if (!gcsa_stream) {
         cerr << "error:[vg mpmap] Cannot open GCSA2 file " << gcsa_name << endl;
         exit(1);
     }
     
     string lcp_name = gcsa_name + ".lcp";
     ifstream lcp_stream(lcp_name);
-    if (!xg_stream) {
+    if (!lcp_stream) {
         cerr << "error:[vg mpmap] Cannot open LCP file " << lcp_name << endl;
         exit(1);
     }
-    
+
+    ifstream matrix_stream;
+    if (!matrix_file_name.empty()) {
+      matrix_stream.open(matrix_file_name);
+      if (!matrix_stream) {
+          cerr << "error:[vg mpmap] Cannot open scoring matrix file " << matrix_file_name << endl;
+          exit(1);
+      }
+    }
+
     // Configure GCSA2 verbosity so it doesn't spit out loads of extra info
     gcsa::Verbosity::set(gcsa::Verbosity::SILENT);
     
     // Configure its temp directory to the system temp directory
-    gcsa::TempFile::setDirectory(find_temp_dir());
+    gcsa::TempFile::setDirectory(temp_file::get_dir());
     
     xg::XG xg_index(xg_stream);
     gcsa::GCSA gcsa_index;
@@ -668,6 +725,8 @@ int main_mpmap(int argc, char** argv) {
     lcp_array.load(lcp_stream);
     
     gbwt::GBWT* gbwt = nullptr;
+    haplo::linear_haplo_structure* sublinearLS = nullptr;
+    haplo::ScoreProvider* haplo_score_provider = nullptr;
     if (!gbwt_name.empty()) {
         ifstream gbwt_stream(gbwt_name);
         if (!gbwt_stream) {
@@ -676,7 +735,24 @@ int main_mpmap(int argc, char** argv) {
         }
         gbwt = new gbwt::GBWT();
         gbwt->load(gbwt_stream);
+        
+        // We have the GBWT available for scoring haplotypes
+        haplo_score_provider = new haplo::GBWTScoreProvider<gbwt::GBWT>(*gbwt);
+    } else if (!sublinearLS_name.empty()) {
+        // We want to use sublinear Li and Stephens as our haplotype scoring approach
+        ifstream ls_stream(sublinearLS_name);
+        
+        // TODO: we only support a single ref contig, and we use these
+        // hardcoded mutation and recombination likelihoods
+        
+        // What is the rank of our one and only reference path
+        auto xg_ref_rank = xg_index.path_rank(sublinearLS_ref_path);
+        
+        sublinearLS = new linear_haplo_structure(ls_stream, -9 * 2.3, -6 * 2.3, xg_index, xg_ref_rank);
+        haplo_score_provider = new haplo::LinearScoreProvider(*sublinearLS);
     }
+    
+    // TODO: Allow using haplo::XGScoreProvider?
     
     SnarlManager* snarl_manager = nullptr;
     if (!snarls_name.empty()) {
@@ -688,10 +764,11 @@ int main_mpmap(int argc, char** argv) {
         snarl_manager = new SnarlManager(snarl_stream);
     }
         
-    MultipathMapper multipath_mapper(&xg_index, &gcsa_index, &lcp_array, gbwt, snarl_manager);
+    MultipathMapper multipath_mapper(&xg_index, &gcsa_index, &lcp_array, haplo_score_provider, snarl_manager);
     
     // set alignment parameters
     multipath_mapper.set_alignment_scores(match_score, mismatch_score, gap_open_score, gap_extension_score, full_length_bonus);
+    if(matrix_stream.is_open()) multipath_mapper.load_scoring_matrix(matrix_stream);
     multipath_mapper.adjust_alignments_for_base_quality = qual_adjusted;
     multipath_mapper.strip_bonuses = strip_full_length_bonus;
     multipath_mapper.band_padding = band_padding;
@@ -709,6 +786,7 @@ int main_mpmap(int argc, char** argv) {
     multipath_mapper.adaptive_diff_exponent = reseed_exp;
     multipath_mapper.use_approx_sub_mem_count = false;
     multipath_mapper.prefilter_redundant_hits = prefilter_redundant_hits;
+    multipath_mapper.precollapse_order_length_hits = precollapse_order_length_hits;
     multipath_mapper.max_sub_mem_recursion_depth = max_sub_mem_recursion_depth;
     multipath_mapper.max_mapping_p_value = max_mapping_p_value;
     if (min_clustering_mem_length) {
@@ -721,7 +799,8 @@ int main_mpmap(int argc, char** argv) {
     // set mapping quality parameters
     multipath_mapper.mapping_quality_method = mapq_method;
     multipath_mapper.max_mapping_quality = max_mapq;
-    multipath_mapper.use_population_mapqs = (gbwt != nullptr);
+    // Use population MAPQs when we have the right option combination to make that sensible.
+    multipath_mapper.use_population_mapqs = (haplo_score_provider != nullptr && population_max_paths > 0);
     multipath_mapper.population_max_paths = population_max_paths;
     
     // set pruning and clustering parameters
@@ -808,10 +887,22 @@ int main_mpmap(int argc, char** argv) {
         auto& output_buf = single_path_output_buffer[omp_get_thread_num()];
         // add optimal alignments to the output buffer
         for (MultipathAlignment& mp_aln : mp_alns) {
-            output_buf.emplace_back();
-            optimal_alignment(mp_aln, output_buf.back());
+            // For each multipath alignment, get the greedy nonoverlapping
+            // single-path alignments from the top k optimal single-path
+            // alignments.
+            vector<Alignment> options;
+            multipath_mapper.reduce_to_single_path(mp_aln, options, localization_max_paths);
+            
+            // There will always be at least one result. Use the optimal alignment.
+            output_buf.emplace_back(std::move(options.front()));
+            
             // compute the Alignment identity to make vg call happy
             output_buf.back().set_identity(identity(output_buf.back().path()));
+            
+            if (mp_aln.has_annotation()) {
+                // Move over annotations
+                output_buf.back().set_allocated_annotation(mp_aln.release_annotation());
+            }
             
             // label with read group and sample name
             if (!read_group.empty()) {
@@ -871,8 +962,18 @@ int main_mpmap(int argc, char** argv) {
         // add optimal alignments to the output buffer
         for (pair<MultipathAlignment, MultipathAlignment>& mp_aln_pair : mp_aln_pairs) {
             
-            output_buf.emplace_back();
-            optimal_alignment(mp_aln_pair.first, output_buf.back());
+            // Compute nonoverlapping single path alignments for each multipath alignment
+            vector<Alignment> options;
+            multipath_mapper.reduce_to_single_path(mp_aln_pair.first, options, localization_max_paths);
+            
+            // There will always be at least one result. Use the optimal alignment.
+            output_buf.emplace_back(std::move(options.front()));
+            
+            if (mp_aln_pair.first.has_annotation()) {
+                // Move over annotations
+                output_buf.back().set_allocated_annotation(mp_aln_pair.first.release_annotation());
+            }
+            
             // compute the Alignment identity to make vg call happy
             output_buf.back().set_identity(identity(output_buf.back().path()));
             
@@ -886,8 +987,16 @@ int main_mpmap(int argc, char** argv) {
             // arbitrarily decide that this is the "previous" fragment
             output_buf.back().mutable_fragment_next()->set_name(mp_aln_pair.second.name());
             
-            output_buf.emplace_back();
-            optimal_alignment(mp_aln_pair.second, output_buf.back());
+            // Now do the second read
+            options.clear();
+            multipath_mapper.reduce_to_single_path(mp_aln_pair.second, options, localization_max_paths);
+            output_buf.emplace_back(std::move(options.front()));
+            
+            if (mp_aln_pair.second.has_annotation()) {
+                // Move over annotations
+                output_buf.back().set_allocated_annotation(mp_aln_pair.second.release_annotation());
+            }
+            
             // compute identity again
             output_buf.back().set_identity(identity(output_buf.back().path()));
             
@@ -1054,7 +1163,15 @@ int main_mpmap(int argc, char** argv) {
     if (snarl_manager != nullptr) {
         delete snarl_manager;
     }
+   
+    if (haplo_score_provider != nullptr) {
+        delete haplo_score_provider;
+    }
     
+    if (sublinearLS != nullptr) {
+        delete sublinearLS;
+    }
+   
     if (gbwt != nullptr) {
         delete gbwt;
     }

@@ -38,9 +38,9 @@ public:
 
     /// Transforms to a succinct, queryable representation
     void to_xg(xg::XG& index, bool store_threads = false);
-    /// As above, except paths with names matching the given regex are removed
-    /// and returned separately by inserting them into the provided map.
-    void to_xg(xg::XG& index, bool store_threads, const regex& paths_to_take, map<string, Path>& removed_paths);
+    /// As above, except paths with names matching the given regex are removed.
+    /// They are returned separately by inserting them into the provided map if not null.
+    void to_xg(xg::XG& index, bool store_threads, const regex& paths_to_take, map<string, Path>* removed_paths = nullptr);
 
     // stores the nodes in the VGs identified by the filenames into the index
     void store_in_index(Index& index);
@@ -51,12 +51,16 @@ public:
                      bool allow_negatives = false);
     void for_each_kmer_parallel(int kmer_size, const function<void(const kmer_t&)>& lambda);
     
-    // Write out kmer lines to GCSA2
+    /**
+     * Write out kmer lines to GCSA2.
+     * size_limit is the maximum space usage for the kmer files in bytes. When the
+     * function returns, size_limit is the total size of the kmer files in bytes.
+     */
     void write_gcsa_kmers_ascii(ostream& out, int kmer_size,
                                 int64_t head_id=0, int64_t tail_id=0);
-    void write_gcsa_kmers_binary(ostream& out, int kmer_size,
+    void write_gcsa_kmers_binary(ostream& out, int kmer_size, size_t& size_limit,
                                  int64_t head_id=0, int64_t tail_id=0);
-    vector<string> write_gcsa_kmers_binary(int kmer_size,
+    vector<string> write_gcsa_kmers_binary(int kmer_size, size_t& size_limit,
                                            int64_t head_id=0, int64_t tail_id=0);
 
     // Should we show our progress running through each graph?             

@@ -248,6 +248,7 @@ public:
 
     /// Construct from protobufs.
     VG(istream& in, bool showp = false, bool warn_on_duplicates = true);
+    void from_istream(istream& in, bool showp = false, bool warn_on_duplicates = true);
 
     /// Construct from an arbitrary source of Graph protobuf messages (which
     /// populates the given Graph and returns a flag for whether it's valid).
@@ -954,13 +955,6 @@ public:
     void lazy_sort(void);
     /// Swap the given nodes. TODO: what does that mean?
     void swap_nodes(Node* a, Node* b);
-
-    /// For each path, assign edits that describe a total match of the mapping to the node.
-    void force_path_match(void);
-    /// For each path, if a mapping has no edits then make it a perfect match against a node.
-    /// This is the same as force_path_match, but only for empty mappings.
-    void fill_empty_path_mappings(void);
-
     
     /// Align without base quality adjusted scores.
     /// Align to the graph.
@@ -969,13 +963,14 @@ public:
     Alignment align(const string& sequence,
                     Aligner* aligner,
                     bool traceback = true,
-                    bool acyclic = false,
+                    bool acyclic_and_sorted = false,
                     size_t max_query_graph_ratio = 0,
                     bool pinned_alignment = false,
                     bool pin_left = false,
                     bool banded_global = false,
                     size_t band_padding_override = 0,
                     size_t max_span = 0,
+                    size_t unroll_length = 0,
                     bool print_score_matrices = false);
     /// Align without base quality adjusted scores.
     /// Align to the graph.
@@ -984,13 +979,14 @@ public:
     Alignment align(const Alignment& alignment,
                     Aligner* aligner,
                     bool traceback = true,
-                    bool acyclic = false,
+                    bool acyclic_and_sorted = false,
                     size_t max_query_graph_ratio = 0,
                     bool pinned_alignment = false,
                     bool pin_left = false,
                     bool banded_global = false,
                     size_t band_padding_override = 0,
                     size_t max_span = 0,
+                    size_t unroll_length = 0,
                     bool print_score_matrices = false);
     
     /// Align with default Aligner.
@@ -999,13 +995,14 @@ public:
     /// May add nodes to the graph, but cleans them up afterward.
     Alignment align(const Alignment& alignment,
                     bool traceback = true,
-                    bool acyclic = false,
+                    bool acyclic_and_sorted = false,
                     size_t max_query_graph_ratio = 0,
                     bool pinned_alignment = false,
                     bool pin_left = false,
                     bool banded_global = false,
                     size_t band_padding_override = 0,
                     size_t max_span = 0,
+                    size_t unroll_length = 0,
                     bool print_score_matrices = false);
     /// Align with default Aligner.
     /// Align to the graph.
@@ -1013,13 +1010,14 @@ public:
     /// May add nodes to the graph, but cleans them up afterward.
     Alignment align(const string& sequence,
                     bool traceback = true,
-                    bool acyclic = false,
+                    bool acyclic_and_sorted = false,
                     size_t max_query_graph_ratio = 0,
                     bool pinned_alignment = false,
                     bool pin_left = false,
                     bool banded_global = false,
                     size_t band_padding_override = 0,
                     size_t max_span = 0,
+                    size_t unroll_length = 0,
                     bool print_score_matrices = false);
     
     /// Align with base quality adjusted scores.
@@ -1029,13 +1027,14 @@ public:
     Alignment align_qual_adjusted(const Alignment& alignment,
                                   QualAdjAligner* qual_adj_aligner,
                                   bool traceback = true,
-                                  bool acyclic = false,
+                                  bool acyclic_and_sorted = false,
                                   size_t max_query_graph_ratio = 0,
                                   bool pinned_alignment = false,
                                   bool pin_left = false,
                                   bool banded_global = false,
                                   size_t band_padding_override = 0,
                                   size_t max_span = 0,
+                                  size_t unroll_length = 0,
                                   bool print_score_matrices = false);
     /// Align with base quality adjusted scores.
     /// Align to the graph.
@@ -1044,13 +1043,14 @@ public:
     Alignment align_qual_adjusted(const string& sequence,
                                   QualAdjAligner* qual_adj_aligner,
                                   bool traceback = true,
-                                  bool acyclic = false,
+                                  bool acyclic_and_sorted = false,
                                   size_t max_query_graph_ratio = 0,
                                   bool pinned_alignment = false,
                                   bool pin_left = false,
                                   bool banded_global = false,
                                   size_t band_padding_override = 0,
                                   size_t max_span = 0,
+                                  size_t unroll_length = 0,
                                   bool print_score_matrices = false);
     
     
@@ -1103,7 +1103,7 @@ public:
     /// Return true if the mapping completely covers the node it maps to and is a perfect match.
     bool mapping_is_total_match(const Mapping& m);
     /// Concatenate the mappings for a pair of nodes; handles multiple mappings per path.
-    map<string, vector<Mapping>> concat_mappings_for_node_pair(id_t id1, id_t id2);
+    map<string, vector<mapping_t>> concat_mappings_for_node_pair(id_t id1, id_t id2);
     /// Concatenate mappings for a list of nodes that we want to concatenate.
     /// Returns, for each path name, a vector of merged mappings, once per path
     /// traversal of the run of nodes. Those merged mappings are in the
@@ -1111,7 +1111,7 @@ public:
     /// in reverse will have their flags toggled). We assume that all mappings on
     /// the given nodes are full-length perfect matches, and that all the nodes
     /// are perfect path neighbors.
-    map<string, vector<Mapping>> concat_mappings_for_nodes(const list<NodeTraversal>& nodes);
+    map<string, vector<mapping_t>> concat_mappings_for_nodes(const list<NodeTraversal>& nodes);
 
     /// Expand a path. TODO: what does that mean?
     /// These versions handle paths in which nodes can be traversed multiple
@@ -1161,13 +1161,14 @@ private:
                     Aligner* aligner,
                     QualAdjAligner* qual_adj_aligner,
                     bool traceback = true,
-                    bool acyclic = false,
+                    bool acyclic_and_sorted = false,
                     size_t max_query_graph_ratio = 0,
                     bool pinned_alignment = false,
                     bool pin_left = false,
                     bool banded_global = false,
                     size_t band_padding_override = 0,
                     size_t max_span = 0,
+                    size_t unroll_length = 0,
                     bool print_score_matrices = false);
 
 

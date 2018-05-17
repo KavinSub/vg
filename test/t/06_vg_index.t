@@ -7,28 +7,127 @@ PATH=../bin:$PATH # for vg
 
 export LC_ALL="en_US.utf8" # force ekg's favorite sort order 
 
-plan tests 35
+plan tests 50
 
-vg construct -r small/x.fa -v small/x.vcf.gz >x.vg
+# Single graph without haplotypes
+vg construct -r small/x.fa -v small/x.vcf.gz > x.vg
 
 vg index -x x.xg x.vg
-is $? 0 "building an xg index of the graph"
-rm -f x.xg
+is $? 0 "building an XG index of a graph"
 
-vg mod -D x.vg >y.vg
-cp y.vg z.vg
-vg ids -j y.vg z.vg
-vg index -x x.xg y.vg z.vg
-is $? 0 "building an xg index using multiple input files"
-rm -rf x.xg y.vg z.vg
+vg index -g x.gcsa x.vg
+is $? 0 "building a GCSA index of a graph"
 
+vg index -x x2.xg -g x2.gcsa x.vg
+is $? 0 "building both indexes at once"
+
+cmp x.xg x2.xg && cmp x.gcsa x2.gcsa && cmp x.gcsa.lcp x2.gcsa.lcp
+is $? 0 "the indexes are identical"
+
+rm -f x.vg
+rm -f x.xg x.gcsa x.gcsa.lcp
+rm -f x2.xg x2.gcsa x2.gcsa.lcp
+
+
+# Single graph with haplotypes
+vg construct -r small/x.fa -v small/x.vcf.gz -a > x.vg
+
+vg index -G x.gbwt -v small/x.vcf.gz -F x.threads x.vg
+is $? 0 "building a GBWT index of a graph with haplotypes"
+
+vg index -x x.xg -F x.threads x.vg
+is $? 0 "building an XG index of a graph with haplotypes"
+
+vg index -g x.gcsa x.vg
+is $? 0 "building a GCSA index of a graph with haplotypes"
+
+vg index -x x2.xg -G x2.gbwt -v small/x.vcf.gz -g x2.gcsa x.vg
+is $? 0 "building all indexes at once"
+
+cmp x.xg x2.xg && cmp x.gbwt x2.gbwt && cmp x.gcsa x2.gcsa && cmp x.gcsa.lcp x2.gcsa.lcp
+is $? 0 "the indexes are identical"
+
+rm -f x.vg
+rm -f x.threads
+rm -f x.xg x.gbwtx.gcsa x.gcsa.lcp
+rm -f x2.xg x2.gbwt x2.gcsa x2.gcsa.lcp
+
+# Subregion graph with haplotypes
+vg construct -r small/x.fa -v small/x.vcf.gz -a --region x:100-200 > x.part.vg
+
+vg index -x x.part.xg -G x.part.gbwt --region x:100-200 -v small/x.vcf.gz x.part.vg 2>log.txt
+is $? 0 "building GBWT index for a regional graph"
+
+is "$(cat log.txt | wc -c)" "0" "no warnings about missing variants produced"
+
+rm -f x.part.vg x.part.xg x.part.gbwt log.txt
+
+# Multiple graphs without haplotypes
+vg construct -r small/xy.fa -v small/xy2.vcf.gz -R x -C > x.vg 2> /dev/null
+vg construct -r small/xy.fa -v small/xy2.vcf.gz -R y -C > y.vg 2> /dev/null
+vg ids -j x.vg y.vg
+
+vg index -x xy.xg x.vg y.vg
+is $? 0 "building an XG index of multiple graphs"
+
+vg index -g xy.gcsa -k 2 x.vg y.vg
+is $? 0 "building a GCSA index of multiple graphs"
+
+vg index -x xy2.xg -g xy2.gcsa -k 2 x.vg y.vg
+is $? 0 "building both indexes at once"
+
+cmp xy.xg xy2.xg && cmp xy.gcsa xy2.gcsa && cmp xy.gcsa.lcp xy2.gcsa.lcp
+is $? 0 "the indexes are identical"
+
+rm -f x.vg y.vg
+rm -f xy.xg xy.gcsa xy.gcsa.lcp
+rm -f xy2.xg xy2.gcsa xy2.gcsa.lcp
+
+
+# Multiple graphs with haplotypes
+vg construct -r small/xy.fa -v small/xy2.vcf.gz -R x -C -a > x.vg 2> /dev/null
+vg construct -r small/xy.fa -v small/xy2.vcf.gz -R y -C -a > y.vg 2> /dev/null
+vg ids -j x.vg y.vg
+
+vg index -G x.gbwt -v small/xy2.vcf.gz -F x.threads x.vg && vg index -G y.gbwt -v small/xy2.vcf.gz -F y.threads y.vg && vg gbwt -m -f -o xy.gbwt x.gbwt y.gbwt
+is $? 0 "building a GBWT index of multiple graphs with haplotypes"
+
+vg index -x xy.xg -F x.threads -F y.threads x.vg y.vg
+is $? 0 "building an XG index of multiple graphs with haplotypes"
+
+vg index -g xy.gcsa -k 2 x.vg y.vg
+is $? 0 "building a GCSA index of multiple graphs with haplotypes"
+
+vg index -x xy2.xg -g xy2.gcsa -k 2 -G xy2.gbwt -v small/xy2.vcf.gz x.vg y.vg
+is $? 0 "building all three indexes at once"
+
+cmp xy.xg xy2.xg && cmp xy.gcsa xy2.gcsa && cmp xy.gcsa.lcp xy2.gcsa.lcp && cmp xy.gbwt xy2.gbwt
+is $? 0 "the indexes are identical"
+
+rm -f x.vg y.vg
+rm -f x.gbwt y.gbwt x.threads y.threads
+rm -f xy.xg xy.gbwt xy.gcsa xy.gcsa.lcp
+rm -f xy2.xg xy2.gbwt xy2.gcsa xy2.gcsa.lcp
+
+
+# GBWT construction options
+vg construct -r small/xy.fa -v small/xy2.vcf.gz -R x -C -a > x.vg 2> /dev/null
+
+vg index -G x_ref.gbwt -T x.vg
+is $? 0 "GBWT can be built for paths"
+
+vg index -G x_both.gbwt -T -v small/xy2.vcf.gz x.vg
+is $? 0 "GBWT can be built for both paths and haplotypes"
+
+rm -f x.vg
+rm -f x_ref.gbwt x_both.gbwt
+
+
+# Other tests
+vg construct -r small/x.fa -v small/x.vcf.gz >x.vg
 vg index -x x.xg x.vg bogus123.vg
 is $? 134 "fail with nonexistent file"
 rm -rf x.idx
-
-vg index -g x.gcsa -k 16 x.vg
-is $? 0 "building a GCSA2 index"
-rm -f x.gcsa x.gcsa.lcp
 
 vg kmers -k 16 -gB x.vg >x.graph
 vg index -i x.graph -g x.gcsa
@@ -67,7 +166,7 @@ is $? 0 "building an xg index containing a gPBWT"
 vg find -t -x x.xg >part.vg
 is "$(cat x.vg part.vg | vg view -j - | jq '.path[].name' | grep '_thread' | wc -l)" 2 "the gPBWT can be queried for two threads for each haplotype"
 
-is $(vg find -x x.xg -q _thread_1_x_0 | vg paths -L - | wc -l) 1 "a specific thread may be pulled from the graph by name"
+is $(vg find -x x.xg -q _thread_1_x_0 | vg paths -L -v - | wc -l) 1 "a specific thread may be pulled from the graph by name"
 
 vg index -x x.xg -v small/x.vcf.gz x.vg --exclude 1
 vg find -t -x x.xg >part.vg
@@ -78,15 +177,15 @@ rm -f x.vg x.xg part.vg x.gcsa
 
 vg construct -r small/xy.fa -v small/xy.vcf.gz -a >xy.vg
 vg index -x xy.xg -v small/xy.vcf.gz xy.vg
-is $(vg find -x xy.xg -t | vg paths -L - | wc -l) 4 "a thread is stored per haplotype, sample, and reference sequence"
-is $(vg find -x xy.xg -q _thread_1_y | vg paths -L - | wc -l) 2 "we have the expected number of threads per chromosome"
+is $(vg find -x xy.xg -t | vg paths -L -v - | wc -l) 4 "a thread is stored per haplotype, sample, and reference sequence"
+is $(vg find -x xy.xg -q _thread_1_y | vg paths -L -v - | wc -l) 2 "we have the expected number of threads per chromosome"
 rm -f xy.vg xy.xg
 
 vg construct -r small/x.fa -v small/x.vcf.gz -a >x.vg
 vg index -x x.xg -v small/x.vcf.gz -H haps.bin x.vg
 is $(du -b haps.bin | cut -f 1) 329 "threads may be exported to binary for use in GBWT construction"
 
-rm -f x.vg x.xg part.vg x.gcsa haps.bin
+rm -f x.vg x.xg part.vg x.gcsa haps.bin x.gbwt
 
 vg construct -r small/x.fa -v small/x.vcf.gz >x.vg
 vg construct -r small/x.fa -v small/x.vcf.gz >y.vg
@@ -98,12 +197,8 @@ vg index -x q.xg q.vg
 
 is $? 0 "storage of multiple graphs in an index succeeds"
 
-vg ids -j x.vg q.vg
-vg index -k 2 -g qx.vg.gcsa q.vg x.vg
-is $? 0 "building a GCSA2 index of two graphs"
-
 rm x.vg y.vg z.vg q.vg
-rm -rf x.idx q.xg qx.vg.gcsa qx.vg.gcsa.lcp
+rm -rf x.idx q.xg
 
 # Now test backward nodes
 vg index -x r.xg reversing/reversing_x.vg
@@ -131,17 +226,11 @@ is $(vg index -g x.gcsa -k 16 -V cyclic/self_loops.vg 2>&1 |  grep 'Index verifi
 
 is $(vg index -g x.gcsa -k 16 -V cyclic/all.vg 2>&1 |  grep 'Index verification complete' | wc -l) 1 "GCSA2 index works on general cyclic graphs"
 
-is $(vg index -g x.gcsa -k 16 -V -F cyclic/no_heads.vg 2>&1 |  grep 'Index verification complete' | wc -l) 1 "GCSA2 forward-only indexing works on cyclic graphs with no heads or tails"
-
 rm -f x.gcsa x.gcsa.lcp
 
 is $(vg construct -r tiny/tiny.fa -v tiny/tiny.vcf.gz | vg index -g t.gcsa -k 16 -V - 2>&1 |  grep 'Index verification complete' | wc -l) 1 "GCSA2 indexing of a tiny graph works"
 
-is $(vg construct -r tiny/tiny.fa -v tiny/tiny.vcf.gz | vg index -g t.gcsa -k 16 -V - 2>&1 | grep 'Index verification complete' | wc -l) 1 "GCSA2 forward-only indexing of a tiny graph works"
-
 is $(vg construct -r tiny/tiny.fa | vg index -g t.gcsa -k 16 -V - 2>&1 | grep 'Index verification complete' | wc -l) 1 "GCSA2 indexing succeeds on a single-node graph"
-
-is $(vg construct -r tiny/tiny.fa | vg index -g t.gcsa -k 16 -V -F - 2>&1 | grep 'Index verification complete' | wc -l) 1 "GCSA2 forward-only indexing succeeds on a single-node graph"
 
 is $(vg index -g t.gcsa reversing/cactus.vg -k 16 -V 2>&1 | grep 'Index verification complete' | wc -l) 1 "GCSA2 indexing succeeds on graph with heads but no tails"
 

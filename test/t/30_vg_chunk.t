@@ -18,7 +18,7 @@ is $(vg chunk -x x.xg -p x -c 10| vg stats - -N) 210 "vg chunk with no options p
 is $(vg chunk -x x.xg -p x -c 10| vg stats - -E) 291 "vg chunk with no options preserves edges"
 
 # check a small chunk
-is $(vg chunk -x x.xg -p x:20-30 -c 0 | vg view - -j | jq -c '.path[0].mapping[].position' | jq 'select ((.node_id == 9))' | grep node | sed s/,// | sort | uniq | wc -l) 1 "chunk has path going through node 9"
+is $(vg chunk -x x.xg -p x:20-30 -c 0 | vg view - -j | jq -c '.path[0].mapping[].position' | jq 'select ((.node_id == "9"))' | grep node | sed s/,// | sort | uniq | wc -l) 1 "chunk has path going through node 9"
 
 # check no crash when using chunk_size, and filenames deterministic
 rm -f _chunk_test*
@@ -59,4 +59,5 @@ vg chunk -x x.xg -n 5 -b x.chunk/
 is $(cat x.chunk/*vg | vg view -V - 2>/dev/null | md5sum | cut -f 1 -d\ ) $(vg view x.vg | md5sum | cut -f 1 -d\ ) "n-chunking works and chunks over the full graph"
 
 rm -rf x.gam.index x.gam.unsrt.index _chunk_test_bed.bed _chunk_test* x.chunk
-rm -f x.vg x.xg xg.gbwt x.gam x.gam.json filter_chunk*.gam chunks.bed
+rm -f x.vg x.xg x.gbwt x.gam x.gam.json filter_chunk*.gam chunks.bed
+rm -f chunk_*.annotate.txt

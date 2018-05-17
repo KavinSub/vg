@@ -3,6 +3,7 @@
 #include "../utility.hpp"
 #include "../mapper.hpp"
 #include "../stream.hpp"
+#include "../region.hpp"
 
 #include <unistd.h>
 #include <getopt.h>
@@ -25,6 +26,7 @@ void help_find(char** argv) {
          << "    -p, --path TARGET      find the node(s) in the specified path range(s) TARGET=path[:pos1[-pos2]]" << endl
          << "    -P, --position-in PATH find the position of the node (specified by -n) in the given path" << endl
          << "    -R, --rank-in PATH     find the rank of the node (specified by -n) in the given path" << endl
+         << "    -I, --list-paths       write out the path names in the index" << endl
          << "    -X, --approx-pos ID    get the approximate position of this node" << endl
          << "    -r, --node-range N:M   get nodes from N to M" << endl
          << "    -G, --gam GAM          accumulate the graph touched by the alignments in the GAM" << endl
@@ -51,7 +53,8 @@ void help_find(char** argv) {
          << "haplotypes:" << endl
          << "    -H, --haplotypes FILE  count xg threads in agreement with alignments in the GAM" << endl
          << "    -t, --extract-threads  extract the threads, writing them as paths to the .vg stream on stdout" << endl
-         << "    -q, --threads-named S  return all threads whose names are prefixed with string S (multiple allowed)" << endl; 
+         << "    -q, --threads-named S  return all threads whose names are prefixed with string S (multiple allowed)" << endl
+         << "    -Q, --paths-named S    return all paths whose names are prefixed with S (multiple allowed)" << endl;
 
 }
 
@@ -96,8 +99,11 @@ int main_find(int argc, char** argv) {
     int min_mem_length = 1;
     string to_graph_file;
     bool extract_threads = false;
-    vector<string> extract_patterns;
+    vector<string> extract_thread_patterns;
+    bool extract_paths = false;
+    vector<string> extract_path_patterns;
     vg::id_t approx_id = 0;
+    bool list_path_names = false;
 
     int c;
     optind = 2; // force optind past command positional argument
@@ -139,12 +145,14 @@ int main_find(int argc, char** argv) {
                 {"min-mem", required_argument, 0, 'Z'},
                 {"extract-threads", no_argument, 0, 't'},
                 {"threads-named", required_argument, 0, 'q'},
+                {"paths-named", required_argument, 0, 'Q'},
                 {"approx-pos", required_argument, 0, 'X'},
+                {"list-paths", no_argument, 0, 'I'},
                 {0, 0, 0, 0}
             };
 
         int option_index = 0;
-        c = getopt_long (argc, argv, "d:x:n:e:s:o:k:hc:LS:z:j:CTp:P:r:amg:M:R:B:fi:DH:G:N:A:Y:Z:tq:X:",
+        c = getopt_long (argc, argv, "d:x:n:e:s:o:k:hc:LS:z:j:CTp:P:r:amg:M:R:B:fi:DH:G:N:A:Y:Z:tq:X:IQ:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -260,6 +268,10 @@ int main_find(int argc, char** argv) {
             node_id_range = optarg;
             break;
 
+        case 'I':
+            list_path_names = true;
+            break;
+
         case 'm':
             get_mappings = true;
             break;
@@ -282,7 +294,12 @@ int main_find(int argc, char** argv) {
 
         case 'q':
             extract_threads = true;
-            extract_patterns.push_back(optarg);
+            extract_thread_patterns.push_back(optarg);
+            break;
+
+        case 'Q':
+            extract_paths = true;
+            extract_path_patterns.push_back(optarg);
             break;
 
         case 'X':
@@ -470,7 +487,6 @@ int main_find(int argc, char** argv) {
         }
         if (!node_ids.empty() && !path_name.empty() && !pairwise_distance && (position_in || rank_in)) {
             // Go get the positions of these nodes in this path
-            
             if (xindex.path_rank(path_name) == 0) {
                 // This path doesn't exist, and we'll get a segfault or worse if
                 // we go look for positions in it.
@@ -501,13 +517,19 @@ int main_find(int argc, char** argv) {
             cout << xindex.node_start(approx_id) << endl;
             return 0;
         }
+        if (list_path_names) {
+            size_t m = xindex.max_path_rank();
+            for (size_t i = 1; i <= m; ++i) {
+                cout << xindex.path_name(i) << endl;
+            }
+        }
         if (!targets.empty()) {
             Graph graph;
             for (auto& target : targets) {
                 // Grab each target region
                 string name;
                 int64_t start, end;
-                xg::parse_region(target, name, start, end);
+                parse_region(target, name, start, end);
                 if(xindex.path_rank(name) == 0) {
                     // Passing a nonexistent path to get_path_range produces Undefined Behavior
                     cerr << "[vg find] error, path " << name << " not found in index" << endl;
@@ -579,13 +601,12 @@ int main_find(int argc, char** argv) {
 
         }
         if (extract_threads) {
-            size_t thread_number = 0;
             bool extract_reverse = false;
             map<string, list<xg::XG::thread_t> > threads;
-            if (extract_patterns.empty()) {
+            if (extract_thread_patterns.empty()) {
                 threads = xindex.extract_threads(extract_reverse);
             } else {
-                for (auto& pattern : extract_patterns) {
+                for (auto& pattern : extract_thread_patterns) {
                     for (auto& t : xindex.extract_threads_matching(pattern, extract_reverse)) {
                         threads[t.first] = t.second;
                     }
@@ -601,14 +622,15 @@ int main_find(int argc, char** argv) {
                     Mapping mapping;
                     mapping.mutable_position()->set_node_id(m.node_id);
                     mapping.mutable_position()->set_is_reverse(m.is_reverse);
-                    
+                    Edit* e = mapping.add_edit();
+                    size_t l = xindex.node_length(m.node_id);
+                    e->set_from_length(l);
+                    e->set_to_length(l);
                     *(path.add_mapping()) = mapping;
                 }
 
                 // Get each thread's name
                 path.set_name(thread_name);
-                // Give each thread a name
-                //path.set_name("_thread_" + to_string(thread_number++));
 
                 // We need a Graph for serialization purposes. We do one chunk per
                 // thread in case the threads are long.
@@ -620,11 +642,34 @@ int main_find(int argc, char** argv) {
                 stream::write_buffered(cout, gb, 0);
             }
         }
+        if (extract_paths) {
+            vector<Path> paths;
+            for (auto& pattern : extract_path_patterns) {
+                for (auto& p : xindex.paths_by_prefix(pattern)) {
+                    paths.push_back(p);
+                }
+            }
+            for(auto& path : paths) {
+                // We need a Graph for serialization purposes.
+                Graph g;
+                *(g.add_path()) = xindex.path(path.name());
+                // Dump the graph with its mappings. TODO: can we restrict these to
+                vector<Graph> gb = { g };
+                stream::write_buffered(cout, gb, 0);
+            }
+        }
         if (!gam_file.empty()) {
             set<vg::id_t> nodes;
             function<void(Alignment&)> lambda = [&nodes](Alignment& aln) {
                 // accumulate nodes matched by the path
                 auto& path = aln.path();
+                if (path.mapping_size() == 1 && !path.mapping(0).has_position() &&
+                    path.mapping(0).edit_size() == 1 && edit_is_insertion(path.mapping(0).edit(0))) {
+                    // This read is a (presumably full length) insert to no
+                    // position. The aligner (used to?) generate these for some
+                    // unmapped reads. We should skip it.
+                    return;
+                }
                 for (int i = 0; i < path.mapping_size(); ++i) {
                     nodes.insert(path.mapping(i).position().node_id());
                 }
@@ -708,7 +753,7 @@ int main_find(int argc, char** argv) {
             for (auto& target : targets) {
                 string name;
                 int64_t start, end;
-                xg::parse_region(target, name, start, end);
+                parse_region(target, name, start, end);
                 // end coordinate is exclusive for get_path()
                 if (end >= 0) {
                     ++end;
@@ -766,7 +811,7 @@ int main_find(int argc, char** argv) {
             gcsa::Verbosity::set(gcsa::Verbosity::SILENT);
             
             // Configure its temp directory to the system temp directory
-            gcsa::TempFile::setDirectory(find_temp_dir());
+            gcsa::TempFile::setDirectory(temp_file::get_dir());
 
             // Open it
             ifstream in_gcsa(gcsa_in.c_str());

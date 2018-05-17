@@ -111,9 +111,9 @@ public:
                bool is_sorted_dag);
                
     // What's the maximum XG version number we can read with this code?
-    const static uint32_t MAX_INPUT_VERSION = 7;
+    const static uint32_t MAX_INPUT_VERSION = 9;
     // What's the version we serialize?
-    const static uint32_t OUTPUT_VERSION = 7;
+    const static uint32_t OUTPUT_VERSION = 9;
                
     // Load this XG index from a stream. Throw an XGFormatError if the stream
     // does not produce a valid XG file.
@@ -150,7 +150,10 @@ public:
     // these provide a way to get an index for each node and edge in the g_iv structure and are used by gPBWT
     size_t node_graph_idx(int64_t id) const;
     size_t edge_graph_idx(const Edge& edge) const;
-    
+
+    int64_t get_min_id() const { return min_id; }
+    int64_t get_max_id() const { return max_id; }
+
     ////////////////////////////////////////////////////////////////////////////
     // Here is the old low-level API that needs to be restated in terms of the 
     // locally traversable graph API and then removed.
@@ -263,16 +266,29 @@ public:
     // Here is the paths API
     ////////////////////////////////////////////////////////////////////////////
 
-    // Pull out the path with the given name.
+    /// Pull out the path with the given name.
     Path path(const string& name) const;
+    /// Get the path string
+    string path_string(const Path& path);
+    /// Get the path as an alignment
+    Alignment path_as_alignment(const string& name);
+    /// Convert the Path to an alignment
+    Alignment path_as_alignment(const Path& path);
+    /// Get all the paths as alignments
+    vector<Alignment> paths_as_alignments(void);
+    /// Get the path object by name
     const XGPath& get_path(const string& name) const;
-    // Returns the rank of the path with the given name, or 0 if no such path
-    // exists.
+    /// Returns the rank of the path with the given name, or 0 if no such path exists.
     size_t path_rank(const string& name) const;
-    // Returns the maxiumum rank of any existing path. A path does exist at this
-    // rank.
+    /// Returns the ranks of the paths prefixed by the given string
+    vector<size_t> path_ranks_by_prefix(const string& prefix) const;
+    /// Returns the names of the paths prefixed by the given string
+    vector<string> path_names_by_prefix(const string& prefix) const;
+    /// Returns the paths with the given prefix
+    vector<Path> paths_by_prefix(const string& prefix) const;
+    /// Returns the maxiumum rank of any existing path. A path does exist at this rank.
     size_t max_path_rank(void) const;
-    // Get the name of the path at the given rank. Ranks begin at 1.
+    /// Get the name of the path at the given rank. Ranks begin at 1.
     string path_name(size_t rank) const;
     vector<size_t> paths_of_node(int64_t id) const;
     map<string, vector<Mapping>> node_mappings(int64_t id) const;
@@ -282,6 +298,8 @@ public:
     size_t node_occs_in_path(int64_t id, size_t rank) const;
     vector<size_t> node_ranks_in_path(int64_t id, const string& name) const;
     vector<size_t> node_ranks_in_path(int64_t id, size_t rank) const;
+    /// Get the positions (but not the orientations) of the given node on the given path.
+    // See also: oriented_occurrences_on_path, which gives rank and orientation
     vector<size_t> position_in_path(int64_t id, const string& name) const;
     vector<size_t> position_in_path(int64_t id, size_t rank) const;
     map<string, vector<size_t> > position_in_paths(int64_t id, bool is_rev = false, size_t offset = 0) const;
@@ -299,7 +317,8 @@ public:
     size_t node_start_at_path_position(const string& name, size_t pos) const;
     /// Get the graph position at the given 0-based path position
     pos_t graph_pos_at_path_position(const string& name, size_t pos) const;
-    Alignment target_alignment(const string& name, size_t pos1, size_t pos2, const string& feature) const;
+    Alignment target_alignment(const string& name, size_t pos1, size_t pos2, const string& feature, bool is_reverse) const;
+    Alignment target_alignment(const string& name, size_t pos1, size_t pos2, const string& feature, bool is_reverse, Mapping& cigar_mapping) const;
     size_t path_length(const string& name) const;
     size_t path_length(size_t rank) const;
     // nearest node (in steps) that is in a path, and the paths
@@ -311,10 +330,10 @@ public:
     /// returns true if the paths are on the same connected component of the graph (constant time)
     bool paths_on_same_component(size_t path_rank_1, size_t path_rank_2) const;
     
-    /// returns the offsets and orientations of a given node on a path
+    /// returns the ranks (NOT base positions) and orientations of a given node on a path
     vector<pair<size_t, bool>> oriented_occurrences_on_path(int64_t id, size_t path) const;
     
-    /// returns the offsets and orientations of a given node on a set of paths
+    /// returns the ranks (NOT base positions) and orientations of a given node on a set of paths
     vector<pair<size_t, vector<pair<size_t, bool>>>> oriented_occurrences_on_paths(int64_t id, vector<size_t>& paths) const;
     
     /// returns all of the paths that a node traversal occurs on, the rank of these occurrences on the path
@@ -438,6 +457,7 @@ public:
       const vector<Edge>& edges_into_new, const vector<Edge>& edges_out_of_old) const;
     
     // We define a thread visit that's much smaller than a Protobuf Mapping.
+    // Note that the fields are not initialized, so the default-constructed ThreadMapping will be garbage.
     struct ThreadMapping {
         int64_t node_id;
         bool is_reverse;
@@ -623,9 +643,8 @@ private:
     ////////////////////////////////////////////////////////////////////////////
 
     // maintain old ids from input, ranked as in s_iv and s_bv
-    int_vector<> i_iv;
-    int64_t min_id; // id ranges don't have to start at 0
-    int64_t max_id;
+    int64_t min_id = 0; // id ranges don't have to start at 0
+    int64_t max_id = 0;
     int_vector<> r_iv; // ids-id_min is the rank
 
     ////////////////////////////////////////////////////////////////////////////
@@ -666,7 +685,7 @@ private:
     sd_vector<>::select_1_type tn_cbv_select;
     
     // Stores the number of haplotypes per contig that gave rise to the threads in the database
-    size_t haplotype_count;
+    size_t haplotype_count = 0;
     
     /// Back-calculate haplotype_count from the thread names for upgrading old XGs.
     void count_haplotypes();
@@ -779,8 +798,8 @@ private:
 
 class XGPath {
 public:
-    XGPath(void) { }
-    ~XGPath(void) { }
+    XGPath(void) = default;
+    ~XGPath(void) = default;
     // Path name is required here only for complaining intelligently when
     // something goes wrong. We can also spit out the total unique members,
     // because in here is the most efficient place to count them.
@@ -798,10 +817,7 @@ public:
     XGPath(XGPath&& other) = delete;
     XGPath& operator=(const XGPath& other) = delete;
     XGPath& operator=(XGPath&& other) = delete;
-    
-    rrr_vector<> nodes;
-    rrr_vector<>::rank_1_type nodes_rank;
-    rrr_vector<>::select_1_type nodes_select;
+    int64_t min_node_id = 0;
     wt_gmr<> ids;
     sd_vector<> directions; // forward or backward through nodes
     int_vector<> positions;
@@ -809,21 +825,24 @@ public:
     bit_vector offsets;
     rank_support_v<1> offsets_rank;
     bit_vector::select_1_type offsets_select;
-    void load(istream& in);
+    void load(istream& in, uint32_t file_version, const function<int64_t(size_t)>& rank_to_id);
     size_t serialize(std::ostream& out,
                      sdsl::structure_tree_node* v = NULL,
                      std::string name = "") const;
     // Get a mapping. Note that the mapping will not have its lengths filled in.
-    Mapping mapping(size_t offset) const; // 0-based
+    Mapping mapping(size_t offset, const function<int64_t(id_t)>& node_length) const;
 
     // Get the node orientation at a 0-based offset.
     id_t node(size_t offset) const;
     bool is_reverse(size_t offset) const;
+    id_t local_id(id_t id) const;
+    id_t external_id(id_t id) const;
+    id_t node_at_position(size_t pos) const;
+    size_t offset_at_position(size_t pos) const;
 };
 
 
 Mapping new_mapping(const string& name, int64_t id, size_t rank, bool is_reverse);
-void parse_region(const string& target, string& name, int64_t& start, int64_t& end);
 void to_text(ostream& out, Graph& graph);
 
 // Serialize a rank_select_int_vector in an SDSL serialization compatible way. Returns the number of bytes written.

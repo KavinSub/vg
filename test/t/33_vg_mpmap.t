@@ -31,10 +31,10 @@ is "$(vg mpmap -B -P 1 -I 200 -D 200 -x xy2.xg -g xy2.gcsa --gbwt-name xy2.gbwt 
 # We need to use snarl cutting to actually consider the alignment as not just a single subpath
 vg snarls xy2.vg > xy2.snarls
 
-is "$(vg mpmap -B -P 1 -x xy2.xg -g xy2.gcsa --gbwt-name xy2.gbwt -s xy2.snarls --max-paths 1 -f reads/xy2.discordant.fq -S | vg view -aj - | jq '.path.mapping[0].position.node_id')" "50" "Single traceback places read on the wrong contig"
+is "$(vg mpmap -B -P 1 -x xy2.xg -g xy2.gcsa --gbwt-name xy2.gbwt -s xy2.snarls --max-paths 1 -f reads/xy2.discordant.fq -S | vg view -aj - | jq -r '.path.mapping[0].position.node_id')" "50" "Single traceback places read on the wrong contig"
 is "$(vg mpmap -B -P 1 -x xy2.xg -g xy2.gcsa --gbwt-name xy2.gbwt -s xy2.snarls --max-paths 1 -f reads/xy2.discordant.fq -S | vg view -aj - | jq '.mapping_quality')" "null" "Single traceback places read with MAPQ 0"
-is "$(vg mpmap -B -P 1 -x xy2.xg -g xy2.gcsa --gbwt-name xy2.gbwt -s xy2.snarls --max-paths 20 -f reads/xy2.discordant.fq -t 1 -S | vg view -aj - | jq '.path.mapping[0].position.node_id')" "1" "Multiple tracebacks place read on the right contig"
-is "$(vg mpmap -B -P 1 -x xy2.xg -g xy2.gcsa --gbwt-name xy2.gbwt -s xy2.snarls --max-paths 10 -f reads/xy2.discordant.fq -S | vg view -aj - | jq '.mapping_quality')" "13" "Multiple tracebacks place read with nonzero MAPQ"
+is "$(vg mpmap -B -P 1 -x xy2.xg -g xy2.gcsa --gbwt-name xy2.gbwt -s xy2.snarls --max-paths 20 -f reads/xy2.discordant.fq -t 1 -S | vg view -aj - | jq -r '.path.mapping[0].position.node_id')" "1" "Multiple tracebacks place read on the right contig"
+is "$(vg mpmap -B -P 1 -x xy2.xg -g xy2.gcsa --gbwt-name xy2.gbwt -s xy2.snarls --max-paths 10 -f reads/xy2.discordant.fq -S | vg view -aj - | jq '.mapping_quality')" "1" "Multiple tracebacks place read with nonzero MAPQ"
 
 rm -f xy2.vg xy2.xg xy2.gcsa xy2.gcsa.lcp xy2.gbwt xy2.snarls
 
@@ -55,7 +55,7 @@ independent_range=$(jq -r ".path.mapping[0].position.node_id" <  temp_independen
 is $(printf "%s\t%s\n" $paired_range $independent_range | awk '{if ($1 < $2) print 1; else print 0}') 1 "paired read alignments forced to be consistent are closer together in node id space than unrestricted alignments"
 is $(printf "%s\t%s\n" $paired_range $distant_range | awk '{if ($1 < $2) print 1; else print 0}') 1 "paired read alignments forced to be near each other are closer together in node id space than those forced to be far apart"
 
-rm temp_paired_alignment.json temp_independent_alignment.json
+rm -f temp_paired_alignment.json temp_distant_alignment.json temp_independent_alignment.json
 
 rm -f graphs/refonly-lrc_kir.vg.xg graphs/refonly-lrc_kir.vg.gcsa graphs/refonly-lrc_kir.vg.gcsa.lcp
 

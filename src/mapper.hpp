@@ -24,6 +24,9 @@
 #include "cluster.hpp"
 #include "graph.hpp"
 #include "translator.hpp"
+// TODO: pull out ScoreProvider into its own file
+#include "haplotypes.hpp"
+#include "algorithms/topological_sort.hpp"
 
 namespace vg {
 
@@ -66,7 +69,7 @@ public:
     AlignmentChainModel(
         vector<vector<Alignment> >& bands,
         Mapper* mapper,
-        const function<double(const Alignment&, const Alignment&, const map<string, vector<pair<size_t, bool> > >&, const map<string, vector<pair<size_t, bool> > >&)>& transition_weight,
+        const function<double(const Alignment&, const Alignment&, const map<string, vector<pair<size_t, bool> > >&, const map<string, vector<pair<size_t, bool> > >&, int64_t)>& transition_weight,
         int vertex_band_width = 10,
         int position_depth = 1,
         int max_connections = 30);
@@ -145,15 +148,19 @@ private:
 class BaseMapper : public Progressive {
     
 public:
-    // Make a Mapper that pulls from an XG succinct graph and a GCSA2 kmer index + LCP array
-    BaseMapper(xg::XG* xidex, gcsa::GCSA* g, gcsa::LCPArray* a, gbwt::GBWT* gbwt = nullptr);
+    // Make a Mapper that pulls from an XG succinct graph and a GCSA2 kmer
+    // index + LCP array, and which can score reads against haplotypes using
+    // the given ScoreProvider.
+    BaseMapper(xg::XG* xidex, gcsa::GCSA* g, gcsa::LCPArray* a, haplo::ScoreProvider* haplo_score_provider = nullptr);
     BaseMapper(void);
     ~BaseMapper(void);
     
     double estimate_gc_content(void);
     
     int random_match_length(double chance_random);
-    
+   
+    void load_scoring_matrix(std::ifstream& matrix_stream);
+
     void set_alignment_scores(int8_t match, int8_t mismatch, int8_t gap_open, int8_t gap_extend, int8_t full_length_bonus,
         double haplotype_consistency_exponent = 1);
     
@@ -210,23 +217,30 @@ public:
     void rescue_high_count_order_length_mems(vector<MaximalExactMatch>& mems,
                                              size_t max_rescue_hit_count);
     
+    /// identifies hits for order-length MEMs that are actually part of longer MEMs above the GCSA's limit and
+    /// merges them. for speed's sake, can have false negatives but no false positives
+    void precollapse_order_length_runs(string::const_iterator seq_begin,
+                                       vector<MaximalExactMatch>& mems);
+    
     /// identifies hits for sub-MEMs that are redundant hits to the parent MEMs and removes them
     /// from the hit lists. for speed's sake, can have false negatives but no false positives
     void prefilter_redundant_sub_mems(vector<MaximalExactMatch>& mems,
                                       vector<pair<int, vector<size_t>>>& sub_mem_containment_graph);
     
-    int sub_mem_thinning_burn_in = 0; // start counting at this many bases to verify sub-MEM count
-    int sub_mem_count_thinning = 1; // count every this many bases to verify sub-MEM count
+    int sub_mem_thinning_burn_in = 16; // start counting at this many bases to verify sub-MEM count
+    int sub_mem_count_thinning = 4; // count every this many bases to verify sub-MEM count
     int min_mem_length; // a mem must be >= this length
     int mem_reseed_length; // the length above which we reseed MEMs to get potentially missed hits
-    bool fast_reseed; // use the fast reseed algorithm
-    double fast_reseed_length_diff; // how much smaller than its parent a sub-MEM can be in the fast reseed algorithm
-    bool adaptive_reseed_diff; // use an adaptive length difference algorithm in reseed algorithm
-    double adaptive_diff_exponent; // exponent that describes limiting behavior of adaptive diff algorithm
-    int hit_max;       // ignore or MEMs with more than this many hits
-    bool use_approx_sub_mem_count = true;
-    int max_sub_mem_recursion_depth = 1;
-    bool prefilter_redundant_hits = false;
+    bool fast_reseed = true; // use the fast reseed algorithm
+    double fast_reseed_length_diff = 0.45; // how much smaller than its parent a sub-MEM can be in the fast reseed algorithm
+    bool adaptive_reseed_diff = true; // use an adaptive length difference algorithm in reseed algorithm
+    double adaptive_diff_exponent = 0.065; // exponent that describes limiting behavior of adaptive diff algorithm
+    int hit_max = 0;       // ignore or MEMs with more than this many hits
+    bool use_approx_sub_mem_count = false;
+    bool prefilter_redundant_hits = true;
+    int max_sub_mem_recursion_depth = 2;
+    int unpaired_penalty = 17;
+    bool precollapse_order_length_hits = true;
     
     // Remove any bonuses used by the aligners from the final reported scores.
     // Does NOT (yet) remove the haplotype consistency bonus.
@@ -295,9 +309,6 @@ protected:
     // Algorithm for choosing an adaptive reseed length based on the length of the parent MEM
     size_t get_adaptive_min_reseed_length(size_t parent_mem_length);
     
-    // debugging, checking of mems using find interface to gcsa
-    void check_mems(const vector<MaximalExactMatch>& mems);
-    
     int alignment_threads; // how many threads will *this* mapper use. Should not be set directly.
     
     void init_aligner(int8_t match, int8_t mismatch, int8_t gap_open, int8_t gap_extend, int8_t full_length_bonus);
@@ -320,8 +331,8 @@ protected:
     gcsa::GCSA* gcsa = nullptr;
     gcsa::LCPArray* lcp = nullptr;
     
-    // GBWT index, if any, for determining haplotype concordance
-    gbwt::GBWT* gbwt = nullptr;
+    // Haplotype score provider, if any, for determining haplotype concordance
+    haplo::ScoreProvider* haplo_score_provider = nullptr;
     
     // The exponent for the haplotype consistency score.
     // 0 = no haplotype consistency scoring done.
@@ -405,20 +416,13 @@ class Mapper : public BaseMapper {
 
 private:
     
-    Alignment align_to_graph(const Alignment& aln,
-                             Graph& graph,
-                             size_t max_query_graph_ratio,
-                             bool traceback,
-                             bool pinned_alignment = false,
-                             bool pin_left = false,
-                             bool global = false,
-                             bool keep_bonuses = true);
     vector<Alignment> align_multi_internal(bool compute_unpaired_qualities,
                                            const Alignment& aln,
                                            int kmer_size,
                                            int stride,
                                            int max_mem_length,
                                            int band_width,
+                                           int band_overlap,
                                            double& cluster_mq,
                                            int keep_multimaps = 0,
                                            int additional_multimaps = 0,
@@ -427,14 +431,13 @@ private:
     void compute_mapping_qualities(pair<vector<Alignment>, vector<Alignment>>& pair_alns, double cluster_mq, double mq_estmate1, double mq_estimate2, double mq_cap1, double mq_cap2);
     vector<Alignment> score_sort_and_deduplicate_alignments(vector<Alignment>& all_alns, const Alignment& original_alignment);
     void filter_and_process_multimaps(vector<Alignment>& all_alns, int total_multimaps);
-    // make the bands used in banded alignment
-    vector<Alignment> make_bands(const Alignment& read, int band_width, vector<pair<int, int>>& to_strip);
     // Return the one best banded alignment.
     vector<Alignment> align_banded(const Alignment& read,
                                    int kmer_size = 0,
                                    int stride = 0,
                                    int max_mem_length = 0,
-                                   int band_width = 1000);
+                                   int band_width = 1000,
+                                   int band_overlap = 500);
     // alignment based on the MEM approach
 //    vector<Alignment> align_mem_multi(const Alignment& alignment, vector<MaximalExactMatch>& mems, double& cluster_mq, double lcp_avg, int max_mem_length, int additional_multimaps = 0);
     // uses approximate-positional clustering based on embedded paths in the xg index to find and align against alignment targets
@@ -447,10 +450,24 @@ private:
                                       int keep_multimaps,
                                       int additional_multimaps);
     
+protected:
+    
+    Alignment align_to_graph(const Alignment& aln,
+                             Graph& graph,
+                             size_t max_query_graph_ratio,
+                             bool traceback,
+                             bool acyclic_and_sorted,
+                             bool pinned_alignment = false,
+                             bool pin_left = false,
+                             bool global = false,
+                             bool keep_bonuses = true);
+    
+    // make the bands used in banded alignment
+    vector<Alignment> make_bands(const Alignment& read, int band_width, int band_overlap, vector<pair<int, int>>& to_strip);
 public:
     // Make a Mapper that pulls from an XG succinct graph, a GCSA2 kmer index +
-    // LCP array, and an optional GBWT haplotype index.
-    Mapper(xg::XG* xidex, gcsa::GCSA* g, gcsa::LCPArray* a, gbwt::GBWT* gbwt = nullptr);
+    // LCP array, and an optional haplotype score provider.
+    Mapper(xg::XG* xidex, gcsa::GCSA* g, gcsa::LCPArray* a, haplo::ScoreProvider* haplo_score_provider = nullptr);
     Mapper(void);
     ~Mapper(void);
 
@@ -462,7 +479,6 @@ public:
     double graph_entropy(void);
 
     // use the xg index to get the first position of an alignment on a reference path
-    map<string, vector<pair<size_t, bool> > > alignment_initial_path_positions(const Alignment& aln);
     void annotate_with_initial_path_positions(Alignment& aln);
     void annotate_with_initial_path_positions(vector<Alignment>& alns);
 
@@ -477,7 +493,7 @@ public:
                          double pval);
 
     /// use the fragment configuration statistics to rescue more precisely
-    pair<bool, bool> pair_rescue(Alignment& mate1, Alignment& mate2, int match_score, int full_length_bonus, bool traceback);
+    pair<bool, bool> pair_rescue(Alignment& mate1, Alignment& mate2, bool& tried1, bool& tried2, int match_score, int full_length_bonus, bool traceback);
 
     /// assuming the read has only been score-aligned, realign from the end position backwards
     Alignment realign_from_start_position(const Alignment& aln, int extra, int iteration);
@@ -493,8 +509,8 @@ public:
 
     // takes the input alignment (with seq, etc) so we have reference to the base sequence
     // for reconstruction the alignments from the SMEMs
-    Alignment mems_to_alignment(const Alignment& aln, vector<MaximalExactMatch>& mems);
-    Alignment mem_to_alignment(MaximalExactMatch& mem);
+    Alignment mems_to_alignment(const Alignment& aln, const vector<MaximalExactMatch>& mems);
+    Alignment mem_to_alignment(const MaximalExactMatch& mem);
     
     /// Use the scoring provided by the internal aligner to re-score the
     /// alignment, scoring gaps between nodes using graph distance from the XG
@@ -508,7 +524,7 @@ public:
     void remove_full_length_bonuses(Alignment& aln);
     
     // run through the alignment and attempt to align unaligned parts of the alignment to the graph in the region where they are anchored
-    Alignment patch_alignment(const Alignment& aln, int max_patch_length);
+    Alignment patch_alignment(const Alignment& aln, int max_patch_length, bool trim_internal_deletions = true);
     // Get the graph context of a particular cluster, not expanding beyond the middles of MEMs.
     VG cluster_subgraph_strict(const Alignment& aln, const vector<MaximalExactMatch>& mems);
     // for aligning to a particular MEM cluster
@@ -516,7 +532,7 @@ public:
     // compute the uniqueness metric based on the MEMs in the cluster
     double compute_uniqueness(const Alignment& aln, const vector<MaximalExactMatch>& mems);
     // wraps align_to_graph with flipping
-    Alignment align_maybe_flip(const Alignment& base, Graph& graph, bool flip, bool traceback, bool banded_global = false);
+    Alignment align_maybe_flip(const Alignment& base, Graph& graph, bool flip, bool traceback, bool acyclic_and_sorted, bool banded_global = false);
 
     bool adjacent_positions(const Position& pos1, const Position& pos2);
     int64_t get_node_length(int64_t node_id);
@@ -528,14 +544,16 @@ public:
                     int kmer_size = 0,
                     int stride = 0,
                     int max_mem_length = 0,
-                    int band_width = 1000);
+                    int band_width = 1000,
+                    int band_overlap = 500);
 
     // Align the given read and return an aligned copy. Does not modify the input Alignment.
     Alignment align(const Alignment& read,
                     int kmer_size = 0,
                     int stride = 0,
                     int max_mem_length = 0,
-                    int band_width = 1000);
+                    int band_width = 1000,
+                    int band_overlap = 500);
 
     // Align the given read with multi-mapping. Returns the alignments in score
     // order, up to multimaps (or max_multimaps if multimaps is 0). Does not update the alignment passed in.
@@ -545,7 +563,8 @@ public:
                                   int kmer_size = 0,
                                   int stride = 0,
                                   int max_mem_length = 0,
-                                  int band_width = 1000);
+                                  int band_width = 1000,
+                                  int band_overlap = 500);
     
     // paired-end based
     
@@ -564,14 +583,6 @@ public:
                            int max_mem_length = 0,
                            bool only_top_scoring_pair = false,
                            bool retrying = false);
-
-    // lossily project an alignment into a particular path space of a graph
-    // the resulting alignment is equivalent to a SAM record against the chosen path
-    Alignment surject_alignment(const Alignment& source,
-                                const set<string>& path_names,
-                                string& path_name,
-                                int64_t& path_pos,
-                                bool& path_reverse);
     
     // compute a mapping quality component based only on the MEMs we've obtained
     double compute_cluster_mapping_quality(const vector<vector<MaximalExactMatch> >& clusters, int read_length);
@@ -591,8 +602,6 @@ public:
     int64_t approx_alignment_position(const Alignment& aln);
     // get the full path offsets for the alignment, considering every mapping if just_first is not set
     map<string, vector<pair<size_t, bool> > > alignment_path_offsets(const Alignment& aln, bool just_min = true, bool nearby = false);
-    // return the path offsets as cached in the alignment
-    map<string ,vector<pair<size_t, bool> > > alignment_refpos_to_path_offsets(const Alignment& aln);
     // get the end position of the alignment
     Position alignment_end_position(const Alignment& aln);
     // get the approximate distance between the starts of the alignments or return -1 if undefined
@@ -618,7 +627,6 @@ public:
     //
     //int max_mem_length; // a mem must be <= this length
     int min_cluster_length; // a cluster needs this much sequence in it for us to consider it
-    int context_depth; // how deeply the mapper will extend out the subgraph prior to alignment
     int max_attempts;  // maximum number of times to try to increase sensitivity or use a lower-hit subgraph
     int thread_extension; // add this many nodes in id space to the end of the thread when building thread into a subgraph
     int max_target_factor; // the maximum multiple of the read length we'll try to align to

@@ -70,6 +70,9 @@
 [submodule "deps/gbwt"]
 	path = deps/gbwt
 	url = https://github.com/jltsiren/gbwt.git
+[submodule "deps/sublinear-Li-Stephens"]
+	path = deps/sublinear-Li-Stephens
+	url = https://github.com/yoheirosen/sublinear-Li-Stephens.git
 [submodule "deps/backward-cpp"]
 	path = deps/backward-cpp
 	url = https://github.com/adamnovak/backward-cpp.git
@@ -79,3 +82,12 @@
 [submodule "deps/structures"]
 	path = deps/structures
 	url = https://github.com/vgteam/structures.git
+[submodule "deps/sparsepp"]
+	path = deps/sparsepp
+	url = https://github.com/greg7mdp/sparsepp.git
+[submodule "deps/vowpal_wabbit"]
+	path = deps/vowpal_wabbit
+	url = https://github.com/JohnLangford/vowpal_wabbit.git
+[submodule "deps/boost-subset"]
+	path = deps/boost-subset
+	url = https://github.com/vgteam/boost-subset.git

@@ -8,7 +8,12 @@
 
 #include <type_traits>
 
+//#define debug_multiple_tracebacks
+//#define debug_verbose_validation
+
 using namespace std;
+using namespace structures;
+
 namespace vg {
     
     void topologically_order_subpaths(MultipathAlignment& multipath_aln) {
@@ -324,13 +329,16 @@ namespace vg {
         aln_out.set_score(score);
     }
     
-    
     int32_t optimal_alignment_score(const MultipathAlignment& multipath_aln){
         // do dynamic programming without traceback
         return optimal_alignment_internal(multipath_aln, nullptr);
     }
     
     vector<Alignment> optimal_alignments(const MultipathAlignment& multipath_aln, size_t count) {
+        
+#ifdef debug_multiple_tracebacks
+        cerr << "Computing top " << count << " alignments" << endl;
+#endif
         
         // Keep a list of what we're going to emit.
         vector<Alignment> to_return;
@@ -360,12 +368,19 @@ namespace vg {
                 // The item belongs in the queue because it fits or it beats
                 // the current worst thing.
                 queue.push(item);
+            } else {
+#ifdef debug_multiple_tracebacks
+                cerr << "Rejected! Queue is full!" << endl;
+#endif
             }
             
             while(queue.size() > max_size) {
                 // We have more possibilities than we need to consider to emit
                 // the top count alignments. Get rid of the worst one.
                 queue.pop_max();
+#ifdef debug_multiple_tracebacks
+                cerr << "Existing item displaced!" << endl;
+#endif
             }
         };
         
@@ -418,6 +433,10 @@ namespace vg {
                 // The path is just to be here
                 step_list_t starting_path{i};
                 
+#ifdef debug_multiple_tracebacks
+                cerr << "Could end at subpath " << i << " with penalty " << penalty << endl;
+#endif
+                
                 try_enqueue(make_pair(penalty, starting_path));
             }
         }
@@ -433,8 +452,18 @@ namespace vg {
             
             assert(!basis.empty());
             
+#ifdef debug_multiple_tracebacks
+            size_t basis_size = 0;
+            for (auto& i : basis) {
+                basis_size++;
+            }
+            cerr << "Consider " << basis_size << " element traceback to " << basis.front() << " with penalty "
+                 << basis_score_difference << endl;
+            cerr << "\t" << pb2json(multipath_aln.subpath(basis.front()).path()) << endl;
+#endif
+            
             if (problem.prev_subpath[basis.front()] == -1) {
-                // If it leads all the way to a read that is optimal as a start
+                // If it leads all the way to a subpath that is optimal as a start
                 
                 // Make an Alignment to emit it in
                 to_return.emplace_back();
@@ -450,6 +479,11 @@ namespace vg {
                 
                 // Set score
                 aln_out.set_score(opt_score - basis_score_difference);
+                
+#ifdef debug_multiple_tracebacks
+                cerr << "Traceback reaches start; emit with score " << aln_out.score() << endl;
+#endif
+                
             } else {
                 // The path does not lead all the way to a source
                 
@@ -492,10 +526,260 @@ namespace vg {
                     // Calculate the score differences from optimal
                     auto total_penalty = basis_score_difference + additional_penalty;
                     
+#ifdef debug_multiple_tracebacks
+                    cerr << "\tAugment with " << prev << " to penalty " << total_penalty << endl;
+#endif
+                    
                     // Put them in the priority queue
                     try_enqueue(make_pair(total_penalty, extended_path));
                 }
                 
+            }
+        }
+        
+        return to_return;
+        
+    }
+    
+    vector<Alignment> optimal_alignments_with_disjoint_subpaths(const MultipathAlignment& multipath_aln, size_t count) {
+        
+#ifdef debug_multiple_tracebacks
+        cerr << "Computing top " << count << " alignments with disjoint subpaths" << endl;
+#endif
+        
+        // Keep a list of what we're going to emit.
+        vector<Alignment> to_return;
+        
+        // Fill out the dynamic programming problem
+        auto dp_result = run_multipath_dp(multipath_aln);
+        // Get the filled DP problem
+        MultipathProblem& problem = get<0>(dp_result);
+        // And the optimal final subpath
+        int64_t& opt_subpath = get<1>(dp_result);
+        // And the optimal score
+        int32_t& opt_score = get<2>(dp_result);
+        
+        // Keep lists of DP steps
+        using step_list_t = ImmutableList<int64_t>;
+        
+        // Have a queue just for end positions
+        MinMaxHeap<pair<int32_t, step_list_t>> end_queue;
+        
+        // Also, subpaths only keep track of their nexts, so we need to invert
+        // that so we can get all valid prev subpaths.
+        vector<vector<int64_t>> prev_subpaths;
+        
+        prev_subpaths.resize(multipath_aln.subpath_size());
+        for (int64_t i = 0; i < multipath_aln.subpath_size(); i++) {
+            // For each subpath
+            
+            // If it has no successors, we can start a traceback here
+            bool valid_traceback_start = true;
+            
+            for (auto& next_subpath : multipath_aln.subpath(i).next()) {
+                // For each next subpath it lists
+                
+                // Register this subpath as a predecessor of the next
+                prev_subpaths[next_subpath].push_back(i);
+                
+                if (multipath_aln.subpath(next_subpath).score() >= 0) {
+                    // This successor has a nonnegative score, so taking it
+                    // after us would generate a longer, same- or
+                    // higher-scoring alignment. So we shouldn't start a
+                    // traceback from subpath i.
+                    valid_traceback_start = false;
+                }
+            }
+            
+            if (valid_traceback_start) {
+                // We can start a traceback here.
+                
+                // The score penalty for starting here is the optimal score minus the optimal score starting here
+                auto penalty = opt_score - (problem.prefix_score[i] + multipath_aln.subpath(i).score());
+                
+                // The path is just to be here
+                step_list_t starting_path{i};
+                
+#ifdef debug_multiple_tracebacks
+                cerr << "Could end at subpath " << i << " with penalty " << penalty << endl;
+#endif
+                
+                end_queue.push(make_pair(penalty, starting_path));
+            }
+        }
+        
+        // Keep a bit vector of the subpaths that have been used, so we can reject
+        // them. TODO: We get the optimal alignment for each end, subject to
+        // the constraint, but any other subpath may be used in a suboptimal
+        // alignment for that subpath, and we may never see its optimal
+        // alignment.
+        vector<bool> subpath_is_used(multipath_aln.subpath_size(), false);
+        
+        while (!end_queue.empty() && to_return.size() < count) {
+            // For each distinct ending subpath in the multipath
+            
+#ifdef debug_multiple_tracebacks
+            cerr << "Look for alignment " << to_return.size() << " ending with " << end_queue.min().second.front() << endl;
+#endif
+            
+            // Make a real queue for starting from it
+            MinMaxHeap<pair<int32_t, step_list_t>> queue;
+            queue.push(end_queue.min());
+            end_queue.pop_min();
+            
+            if (subpath_is_used[queue.min().second.front()]) {
+                // We shouldn't ever have the place we want to trace back from already used, but if it is already used we don't want to use it.
+                
+#ifdef debug_multiple_tracebacks
+                cerr << "Skip " << queue.min().second.front() << " because it was already emitted in a previous traceback" << endl;
+#endif
+                
+                continue;
+            }
+            
+            // We also want to remember the lowest penalty with which each
+            // subpath has been queued, so we can do a real Dijkstra traversal
+            // and not waste all our time on combinatorial paths to get places
+            // with the same or higher penalty.
+            vector<size_t> min_penalty_for_subpath(multipath_aln.subpath_size(), numeric_limits<size_t>::max());
+            // Seed with the end we are starting with.
+            min_penalty_for_subpath[queue.min().second.front()] = queue.min().first;
+            
+            // We also track visited-ness, so we don;t query edges for the same thing twice.
+            // TODO: This is the world's most hacky Dijkstra and needs to be rewritten from the top with an understanding of what it is supposed to be doing.
+            vector<bool> subpath_is_visited(multipath_aln.subpath_size(), false);
+        
+            while (!queue.empty() && to_return.size() < count) {
+                // Each iteration
+                
+                // Grab the best list as our basis
+                int32_t basis_score_difference;
+                step_list_t basis;
+                tie(basis_score_difference, basis) = queue.min();
+                queue.pop_min();
+                
+                assert(!basis.empty());
+                
+#ifdef debug_multiple_tracebacks
+                size_t basis_size = 0;
+                for (auto& i : basis) {
+                    basis_size++;
+                }
+                cerr << "Consider " << basis_size << " element traceback to " << basis.front() << " with penalty "
+                     << basis_score_difference << endl;
+                cerr << "\t" << pb2json(multipath_aln.subpath(basis.front()).path()) << endl;
+#endif
+
+                if (subpath_is_used[basis.front()]) {
+                    // We already used this start and can't use it again. Try something else.
+                    // TODO: This shouldn't happen; we are also catching this case on enqueue.
+#ifdef debug_multiple_tracebacks
+                    cerr << "Traceback reaches already used subpath; skip" << endl;
+#endif
+                    
+                    continue;
+                }
+                
+                if (subpath_is_visited[basis.front()]) {
+                    // We already processed this; this must be a higher cost version of the same thing.
+                    assert(basis_score_difference >= min_penalty_for_subpath[basis.front()]);
+                    
+#ifdef debug_multiple_tracebacks
+                    cerr << "Found more expensive version of subpath that has already been processed; skip" << endl;
+#endif
+                    
+                    continue;
+                }
+                subpath_is_visited[basis.front()] = true;
+                
+                if (problem.prev_subpath[basis.front()] == -1) {
+                    // If it leads all the way to a subpath that is optimal as a start
+                    
+                    // Make an Alignment to emit it in
+                    to_return.emplace_back();
+                    Alignment& aln_out = to_return.back();
+                    
+                    // Set up read info and MAPQ
+                    // TODO: MAPQ on secondaries?
+                    transfer_read_metadata(multipath_aln, aln_out);
+                    aln_out.set_mapping_quality(multipath_aln.mapping_quality());
+                    
+                    // Populate path
+                    populate_path_from_traceback(multipath_aln, problem, basis.begin(), basis.end(), aln_out.mutable_path());
+                    
+                    // Set score
+                    aln_out.set_score(opt_score - basis_score_difference);
+                    
+#ifdef debug_multiple_tracebacks
+                    cerr << "Traceback reaches start; emit with score " << aln_out.score() << endl;
+#endif
+
+                    for (auto& subpath : basis) {
+                        // Record the used-ness of all the subpaths
+                        subpath_is_used[subpath] = true;
+                    }
+
+                    // Break out of this loop and try a different starting position
+                    break;
+                    
+                } else {
+                    // The path does not lead all the way to a source
+                    
+                    // The destinations will be all places we could have arrived here from
+                    auto& here = basis.front();
+                    
+                    // To compute the additional score difference, we need to know what our optimal prefix score was.
+                    auto& best_prefix_score = problem.prefix_score[here];
+                    
+                    for (auto& prev : prev_subpaths[here]) {
+                        // For each candidate previous subpath
+                        
+                        if (subpath_is_used[prev]) {
+                            // This subpath has already been used in an emitted alignment, so we can't use it.
+                            
+#ifdef debug_multiple_tracebacks
+                            cerr << "\tSkip " << prev << " which is already used" << endl;
+#endif
+                            
+                            continue;
+                        }
+                        
+                        // For each, compute the score of the optimal alignment ending at that predecessor
+                        auto prev_opt_score = problem.prefix_score[prev] + multipath_aln.subpath(prev).score();
+                        
+                        // What's the difference we would take if we went with this predecessor?
+                        auto additional_penalty = best_prefix_score - prev_opt_score;
+                        
+                        // Calculate the score differences from optimal
+                        auto total_penalty = basis_score_difference + additional_penalty;
+                        
+                        if (total_penalty >= min_penalty_for_subpath[prev]) {
+                            // This previous subpath is already reachable with a penalty as good or better.
+                            // Don't bother with it again
+                            
+#ifdef debug_multiple_tracebacks
+                            cerr << "\tSkip " << prev << " with penalty " << total_penalty << " >= " << min_penalty_for_subpath[prev] << endl;
+#endif
+                            
+                            continue;
+                        }
+                        
+                        // Record that this is the cheapest we managed to get here
+                        min_penalty_for_subpath[prev] = total_penalty;
+                        
+                        // Make an extended path
+                        auto extended_path = basis.push_front(prev);
+                        
+#ifdef debug_multiple_tracebacks
+                        cerr << "\tAugment with " << prev << " to penalty " << total_penalty << endl;
+#endif
+                        
+                        // Put them in the priority queue
+                        queue.push(make_pair(total_penalty, extended_path));
+                    }
+                    
+                    
+                }
             }
         }
         
@@ -529,6 +813,12 @@ namespace vg {
         rev_comp_out.set_sequence(reverse_complement(multipath_aln.sequence()));
         // reverse base qualities
         rev_comp_out.set_quality(string(multipath_aln.quality().rbegin(), multipath_aln.quality().rend()));
+        
+        // transfer the rest of the metadata directly
+        rev_comp_out.set_read_group(multipath_aln.read_group());
+        rev_comp_out.set_name(multipath_aln.name());
+        rev_comp_out.set_sample_name(multipath_aln.sample_name());
+        rev_comp_out.set_paired_read_name(multipath_aln.paired_read_name());
         
         vector< vector<size_t> > reverse_edge_lists(multipath_aln.subpath_size());
         vector<size_t> reverse_starts;
@@ -700,7 +990,7 @@ namespace vg {
         if (from.has_fragment_prev()) {
             to.set_paired_read_name(from.fragment_prev().name());
         }
-        else {
+        else if (from.has_fragment_next()) {
             to.set_paired_read_name(from.fragment_next().name());
         }
     }
@@ -803,6 +1093,286 @@ namespace vg {
         if (multipath_aln.start_size() > 0) {
             identify_start_subpaths(sub_multipath_aln);
         }
+    }
+    
+    
+    bool validate_multipath_alignment(const MultipathAlignment& multipath_aln, HandleGraph& handle_graph) {
+        
+        // are the subpaths in topological order?
+        
+        for (size_t i = 0; i < multipath_aln.subpath_size(); i++) {
+            const Subpath& subpath = multipath_aln.subpath(i);
+            for (size_t j = 0; j < subpath.next_size(); j++) {
+                if (subpath.next(j) <= i) {
+#ifdef debug_verbose_validation
+                    cerr << "validation failure on topological order" << endl;
+#endif
+                    return false;
+                }
+            }
+        }
+        
+        // are the start subpaths properly labeled (if they are included)?
+        
+        if (multipath_aln.start_size()) {
+            vector<bool> is_source(multipath_aln.subpath_size(), true);
+            for (size_t i = 0; i < multipath_aln.subpath_size(); i++) {
+                const Subpath& subpath = multipath_aln.subpath(i);
+                for (size_t j = 0; j < subpath.next_size(); j++) {
+                    is_source[subpath.next(j)] = false;
+                }
+            }
+            
+            size_t num_starts = 0;
+            for (size_t i = 0; i < multipath_aln.subpath_size(); i++) {
+                num_starts += is_source[i];
+            }
+            
+            if (num_starts != multipath_aln.start_size()) {
+#ifdef debug_verbose_validation
+                cerr << "validation failure on correct number of starts" << endl;
+                for (size_t i = 0; i < multipath_aln.subpath_size(); i++) {
+                    if (is_source[i]) {
+                        cerr << i << " ";
+                    }
+                }
+                cerr << endl;
+#endif
+                return false;
+            }
+            
+            for (size_t i = 0; i < multipath_aln.start_size(); i++) {
+                if (!is_source[multipath_aln.start(i)]) {
+#ifdef debug_verbose_validation
+                    cerr << "validation failure on correctly identified starts" << endl;
+                    for (size_t i = 0; i < multipath_aln.subpath_size(); i++) {
+                        if (is_source[i]) {
+                            cerr << i << " ";
+                        }
+                        cerr << endl;
+                    }
+#endif
+                    return false;
+                }
+            }
+        }
+        
+        // are the subpaths contiguous along the read?
+        
+        vector<pair<int64_t, int64_t>> subpath_read_interval(multipath_aln.subpath_size(), make_pair<int64_t, int64_t>(-1, -1));
+        for (size_t i = 0; i < multipath_aln.subpath_size(); i++) {
+            
+            if (subpath_read_interval[i].first < 0) {
+                subpath_read_interval[i].first = 0;
+            }
+            
+            const Subpath& subpath = multipath_aln.subpath(i);
+            int64_t subsequence_length = path_to_length(subpath.path());
+            subpath_read_interval[i].second = subpath_read_interval[i].first + subsequence_length;
+            
+            if (!subpath.next_size()) {
+                if (subpath_read_interval[i].second != multipath_aln.sequence().size()) {
+#ifdef debug_verbose_validation
+                    cerr << "validation failure on using complete read" << endl;
+                    cerr << "subpath " <<  i << " ends on sequence index " << subpath_read_interval[i].second << " of " << multipath_aln.sequence().size() << endl;
+                    cerr << pb2json(subpath) << endl;
+                    for (size_t j = 0; j < multipath_aln.subpath_size(); j++) {
+                        cerr << j << " (" << subpath_read_interval[j].first << ", " << subpath_read_interval[j].second << "): ";
+                        for (size_t k = 0; k < multipath_aln.subpath(j).next_size(); k++) {
+                            cerr << multipath_aln.subpath(j).next(k) << " ";
+                        }
+                        cerr << endl;
+                    }
+#endif
+                    return false;
+                }
+            }
+            else {
+                for (size_t j = 0; j < subpath.next_size(); j++) {
+                    if (subpath_read_interval[subpath.next(j)].first >= 0) {
+                        if (subpath_read_interval[subpath.next(j)].first != subpath_read_interval[i].second) {
+#ifdef debug_verbose_validation
+                            cerr << "validation failure on read contiguity" << endl;
+#endif
+                            return false;
+                        }
+                    }
+                    else {
+                        subpath_read_interval[subpath.next(j)].first = subpath_read_interval[i].second;
+                    }
+                }
+            }
+        }
+        
+        // are all of the subpaths nonempty?
+        
+        for (size_t i = 0; i < multipath_aln.subpath_size(); i++) {
+            if (multipath_aln.subpath(i).path().mapping_size() == 0) {
+#ifdef debug_verbose_validation
+                cerr << "validation failure on containing only nonempty paths" << endl;
+                cerr << "subpath " << i << ": " << pb2json(multipath_aln.subpath(i)) << endl;
+#endif
+                return false;
+            }
+            for (size_t j = 0; j < multipath_aln.subpath(i).path().mapping_size(); j++) {
+                if (multipath_aln.subpath(i).path().mapping(j).edit_size() == 0) {
+#ifdef debug_verbose_validation
+                    cerr << "validation failure on containing only nonempty mappings" << endl;
+                    cerr << "subpath " << i << ": " << pb2json(multipath_aln.subpath(i)) << endl;
+#endif
+                    return false;
+                }
+            }
+        }
+        
+        
+        // are the subpaths contiguous within the graph?
+        
+        auto validate_adjacent_mappings = [&](const Mapping& mapping_from, const Mapping& mapping_to) {
+            size_t mapping_from_end_offset = mapping_from.position().offset() + mapping_from_length(mapping_from);
+            if (mapping_from.position().node_id() == mapping_to.position().node_id() &&
+                mapping_from.position().is_reverse() == mapping_to.position().is_reverse()) {
+                if (mapping_to.position().offset() != mapping_from_end_offset) {
+#ifdef debug_verbose_validation
+                    cerr << "validation failure on within-node adjacency" << endl;
+                    cerr << pb2json(mapping_from) << "->" << pb2json(mapping_to) << endl;
+#endif
+                    return false;
+                }
+            }
+            else {
+                if (mapping_from_end_offset != handle_graph.get_length(handle_graph.get_handle(mapping_from.position().node_id()))) {
+#ifdef debug_verbose_validation
+                    cerr << "validation failure on using edge at middle of node" << endl;
+                    cerr << pb2json(mapping_from) << "->" << pb2json(mapping_to) << endl;
+#endif
+                    return false;
+                }
+                
+                handle_t handle_from = handle_graph.get_handle(mapping_from.position().node_id(), mapping_from.position().is_reverse());
+                handle_t handle_to = handle_graph.get_handle(mapping_to.position().node_id(), mapping_to.position().is_reverse());
+                
+                bool found_edge = false;
+                function<bool(const handle_t&)> check_for_edge = [&](const handle_t& next_handle) {
+                    found_edge = (next_handle == handle_to);
+                    return !found_edge;
+                };
+                handle_graph.follow_edges(handle_from, false, check_for_edge);
+                
+                if (!found_edge) {
+#ifdef debug_verbose_validation
+                    cerr << "validation failure on nodes not connected by an edge" << endl;
+                    cerr << pb2json(mapping_from) << "->" << pb2json(mapping_to) << endl;
+#endif
+                    return false;
+                }
+            }
+            return true;
+        };
+        
+        for (size_t i = 0; i < multipath_aln.subpath_size(); i++) {
+            const Subpath& subpath = multipath_aln.subpath(i);
+            const Path& path = subpath.path();
+            for (size_t j = 1; j < path.mapping_size(); j++) {
+                if (!validate_adjacent_mappings(path.mapping(j - 1), path.mapping(j))) {
+                    return false;
+                }
+            }
+            const Mapping& final_mapping = path.mapping(path.mapping_size() - 1);
+            for (size_t j = 0; j < subpath.next_size(); j++) {
+                if (!validate_adjacent_mappings(final_mapping, multipath_aln.subpath(subpath.next(j)).path().mapping(0))) {
+                    return false;
+                }
+            }
+        }
+        
+        
+        // do the paths represent valid alignments of the associated read string and graph path?
+        
+        auto validate_mapping_edits = [&](const Mapping& mapping, const string& subseq) {
+            string node_seq = handle_graph.get_sequence(handle_graph.get_handle(mapping.position().node_id()));
+            string rev_node_seq = reverse_complement(node_seq);
+            size_t node_idx = mapping.position().offset();
+            size_t seq_idx = 0;
+            for (size_t i = 0; i < mapping.edit_size(); i++) {
+                const Edit& edit = mapping.edit(i);
+                if (edit_is_match(edit)) {
+                    for (size_t j = 0; j < edit.from_length(); j++, node_idx++, seq_idx++) {
+                        if ((mapping.position().is_reverse() ? rev_node_seq[node_idx] : node_seq[node_idx]) != subseq[seq_idx]) {
+#ifdef debug_verbose_validation
+                            cerr << "validation failure on match that does not match" << endl;
+                            cerr << pb2json(mapping) << ", " << subseq << endl;
+#endif
+                            return false;
+                        }
+                    }
+                }
+                else if (edit_is_sub(edit)) {
+                    for (size_t j = 0; j < edit.from_length(); j++, node_idx++, seq_idx++) {
+                        if ((mapping.position().is_reverse() ? rev_node_seq[node_idx] : node_seq[node_idx]) == subseq[seq_idx]) {
+#ifdef debug_verbose_validation
+                            cerr << "validation failure on mismatch that matches" << endl;
+                            cerr << pb2json(mapping) << ", " << subseq << endl;
+#endif
+                            return false;
+                        }
+                        if (edit.sequence()[j] != subseq[seq_idx]) {
+#ifdef debug_verbose_validation
+                            cerr << "validation failure on substitution sequence that does not match read" << endl;
+                            cerr << pb2json(mapping) << ", " << subseq << endl;
+#endif
+                            return false;
+                        }
+                    }
+                }
+                else if (edit_is_insertion(edit)) {
+                    for (size_t j = 0; j < edit.to_length(); j++, seq_idx++) {
+                        if (edit.sequence()[j] != subseq[seq_idx]) {
+#ifdef debug_verbose_validation
+                            cerr << "validation failure on insertion sequence that does not match read" << endl;
+                            cerr << pb2json(mapping) << ", " << subseq << endl;
+#endif
+                            return false;
+                        }
+                    }
+                }
+                else if (edit_is_deletion(edit)) {
+                    node_idx += edit.from_length();
+                }
+            }
+            return true;
+        };
+        
+        for (size_t i = 0; i < multipath_aln.subpath_size(); i++) {
+            const Subpath& subpath = multipath_aln.subpath(i);
+            const Path& path = subpath.path();
+            size_t read_start = subpath_read_interval[i].first;
+            for (size_t j = 0; j < path.mapping_size(); j++) {
+                size_t read_mapping_len = mapping_to_length(path.mapping(j));
+                if (!validate_mapping_edits(path.mapping(j), multipath_aln.sequence().substr(read_start, read_mapping_len))) {
+                    return false;
+                }
+                read_start += read_mapping_len;
+            }
+        }
+        
+        // do the scores match the alignments?
+        
+        // TODO: this really deserves a test, but there's a factoring problem because the qual adj aligner needs to know
+        // the node sequence to score mismatches but the node sequence is not stored in the Alignment object
+        
+        //        for (size_t i = 0; i < multipath_aln.subpath_size(); i++) {
+        //            const Subpath& subpath = multipath_aln.subpath(i);
+        //            Alignment& alignment;
+        //            *alignment.mutable_sequence() = multipath_aln.sequence().substr(subpath_read_interval[i].first,
+        //                                                                            subpath_read_interval[i].second - subpath_read_interval[i].first);
+        //            *alignment.mutable_quality() = multipath_aln.quality().substr(subpath_read_interval[i].first,
+        //                                                                          subpath_read_interval[i].second - subpath_read_interval[i].first);
+        //            *alignment.mutable_path() = subpath.path();
+        //        }
+        
+        
+        return true;
     }
 }
 

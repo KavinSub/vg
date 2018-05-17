@@ -59,6 +59,7 @@ class VGCITest(TestCase):
         self.do_teardown = True
         self.baseline = 's3://cgl-pipeline-inputs/vg_cgl/vg_ci/jenkins_regression_baseline'
         self.cores = 8
+        self.sim_chunk_size = 100000
         self.force_outstore = False
 
         self.loadCFG()
@@ -209,7 +210,13 @@ class VGCITest(TestCase):
         print '</VGCI>\n'
                 
     def _toil_vg_index(self, chrom, graph_path, xg_path, gcsa_path, misc_opts, dir_tag, file_tag):
-        """ Wrap toil-vg index.  Files passed are copied from store instead of computed """
+        """
+        
+        Wrap toil-vg index. Files passed are copied from store instead of
+        computed. If "SKIP" is used as a filename, don't create or copy that
+        index. Otherwise, pass None as a filename to compute that index.
+        
+        """
         job_store = self._jobstore(dir_tag)
         out_store = self._outstore(dir_tag)
         opts = ' '.join(self._toil_vg_io_opts()) + ' '
@@ -222,17 +229,22 @@ class VGCITest(TestCase):
         if graph_path:
             opts += '--graphs {} '.format(graph_path)
         if xg_path:
-            opts += '--skip_xg '
-            self._get_remote_file(xg_path, os.path.join(out_store, os.path.basename(xg_path)))
-        if gcsa_path and (not misc_opts or '--skip_gcsa' not in misc_opts):
-            opts += '--skip_gcsa '
-            self._get_remote_file(gcsa_path, os.path.join(out_store, os.path.basename(gcsa_path)))
-            self._get_remote_file(gcsa_path + '.lcp', os.path.join(out_store, os.path.basename(gcsa_path) + '.lcp'))
+            if xg_path != "SKIP":
+                self._get_remote_file(xg_path, os.path.join(out_store, os.path.basename(xg_path)))
+        else:
+            opts += '--xg_index '
+        if gcsa_path:
+            if gcsa_path != "SKIP":
+                self._get_remote_file(gcsa_path, os.path.join(out_store, os.path.basename(gcsa_path)))
+                self._get_remote_file(gcsa_path + '.lcp', os.path.join(out_store, os.path.basename(gcsa_path) + '.lcp'))
+        else:
+            opts += '--gcsa_index '
         opts += '--index_name {}'.format(file_tag)
         if misc_opts:
             opts += ' {} '.format(misc_opts)
         
         cmd = 'toil-vg index {} {} {}'.format(job_store, out_store, opts)
+        sys.stderr.write("Running toil-vg indexing: {}".format(cmd))
         
         subprocess.check_call(cmd, shell=True)        
         
@@ -332,11 +344,12 @@ class VGCITest(TestCase):
                                      work_dir = os.path.abspath(self.workdir)))
         os.remove(uf_vcf_file)
         
-        # Make the xg with gpbwt of the input graph
+        # Make the gbwt of the input graph
+        # Don't bother with the GCSA
         index_name = 'index-gbwt'
         chrom, offset = self._bakeoff_coords(region)
-        self._toil_vg_index(chrom, vg_file, None, None,
-                            '--vcf_phasing {} --skip_gcsa --xg_index_cores {} --make_gbwt'.format(
+        self._toil_vg_index(chrom, vg_file, None, "SKIP",
+                            '--vcf_phasing {} --xg_index_cores {} --gbwt_index'.format(
                                 os.path.abspath(f_vcf_file), self.cores), tag, index_name)
         gbwt_path = os.path.join(out_store, index_name + '.gbwt')
         # Drop the extra xg
@@ -403,8 +416,8 @@ class VGCITest(TestCase):
         # Make the xg with gpbwt of the input graph
         index_name = 'index-gpbwt'
         chrom, offset = self._bakeoff_coords(region)
-        self._toil_vg_index(chrom, vg_file, None, None,
-                            '--vcf_phasing {} --skip_gcsa --xg_index_cores {}'.format(
+        self._toil_vg_index(chrom, vg_file, None, "SKIP",
+                            '--vcf_phasing {} --xg_index_cores {}'.format(
                                 os.path.abspath(f_vcf_file), self.cores), tag, index_name)
         index_path = os.path.join(out_store, index_name + '.xg')
         
@@ -419,42 +432,57 @@ class VGCITest(TestCase):
             # This is straght from Erik.  We mush together the original graph
             # (without paths) and the thread path from the xg index
             with context.get_toil(job_store) as toil:
+                # Make sure the base graph isn't trivially small
+                assert(os.stat(os.path.join(out_store, os.path.basename(vg_file))).st_size >= 1000)
+            
+                # Drop path info
                 cmd = ['vg', 'mod', '-D', os.path.join(out_store_name, os.path.basename(vg_file))]
                 toil.start(Job.wrapJobFn(toil_call, context, cmd,
                                          work_dir = os.path.abspath(self.workdir),
-                                         out_path = tmp_thread_path))
+                                         out_path = tmp_thread_path + '.graph'))
+                                         
+                assert(os.stat(tmp_thread_path + '.graph').st_size >= 1000)
 
                 # TODO: nothing is supposed to be depending on the particular
                 # syntax of the thread names. Stop doing that or formalize a way to get
                 
                 # TODO: Use the GBWT instead of the GPBWT to extract the threads we want.
 
-                # TODO: This will only get the first unbroken chunk (part 0) of
-                # a haplotype. This needs to be modified to get threads _0
-                # through _n for however many unbroken threads actually make up
-                # the haplotype we want to extract.
-                
                 cmd = ['vg', 'find', '-q', '_thread_{}_{}_{}'.format(sample, chrom, hap),
                        '-x', os.path.join(out_store_name, os.path.basename(index_path))]
                 toil.start(Job.wrapJobFn(toil_call, context, cmd,
                                          work_dir = os.path.abspath(self.workdir),
-                                         out_path = tmp_thread_path,
-                                         out_append = True))
+                                         out_path = tmp_thread_path + '.paths'))
+                                         
+                assert(os.stat(tmp_thread_path + '.paths').st_size >= 1000)
+                
+                with open(tmp_thread_path, 'w') as dest:
+                    # Concatenate the graph and the path for the part we care about
+                    with open(tmp_thread_path + '.graph') as src:
+                        shutil.copyfileobj(src, dest)
+                    with open(tmp_thread_path + '.paths') as src:
+                        shutil.copyfileobj(src, dest)
+                        
+                assert(os.stat(tmp_thread_path).st_size >= 1000)
 
                 # Then we trim out anything other than our thread path
                 cmd = ['vg', 'mod', '-N', os.path.basename(tmp_thread_path)]
                 toil.start(Job.wrapJobFn(toil_call, context, cmd,
                                          work_dir = os.path.abspath(self.workdir),
                                          out_path = tmp_thread_path + '.drop'))
+                                         
+                assert(os.stat(tmp_thread_path + '.drop').st_size >= 1000)
 
             # Index the thread graphs so we can simulate from them
-            self._toil_vg_index(chrom, tmp_thread_path + '.drop', None, None,
-                                '--skip_gcsa', tag, 'thread_{}'.format(hap))
+            self._toil_vg_index(chrom, tmp_thread_path + '.drop', None, "SKIP",
+                                None, tag, 'thread_{}'.format(hap))
 
             # They're in a tmp work dir so this is probably overkill
+            os.remove(tmp_thread_path + '.graph')
+            os.remove(tmp_thread_path + '.paths')
             os.remove(tmp_thread_path)
             os.remove(tmp_thread_path + '.drop')
-
+            
         return index_path, os.path.join(out_store, 'thread_0.xg'), os.path.join(out_store, 'thread_1.xg')
 
     def _print_vcfeval_summary_table(self, summary_path, baseline_f1, threshold, header=True, name=None):
@@ -580,7 +608,10 @@ class VGCITest(TestCase):
             opts += '--container {} '.format(self.container)
         # note, using the same seed only means something if using same
         # number of chunks.  we make that explicit here
-        opts += '--maxCores {} --sim_chunks {} --seed {} '.format(self.cores, 8, 8)
+        sim_chunks = int(reads / self.sim_chunk_size)
+        if reads % self.sim_chunk_size:
+            sim_chunks += 1
+        opts += '--maxCores {} --sim_chunks {} --seed {} '.format(self.cores, sim_chunks, 8)
         if sim_opts:
             opts += '--sim_opts \'{}\' '.format(sim_opts)
         if sim_fastq:
@@ -588,7 +619,7 @@ class VGCITest(TestCase):
         opts += '--annotate_xg {} '.format(base_xg_path)
         for source_path_name in source_path_names:
             opts += '--path {} '.format(source_path_name)
-        cmd = 'toil-vg sim {} {} {} {} --gam {}'.format(
+        cmd = 'toil-vg sim {} {} {} {} --gam {} --fastq_out'.format(
             job_store, ' '.join(sim_xg_paths), reads / 2, out_store, opts)
         subprocess.check_call(cmd, shell=True)
 
@@ -609,7 +640,8 @@ class VGCITest(TestCase):
             # don't waste time sharding reads since we only run on one node
             single_reads_chunk = True,
             mpmap_opts = ['-B', '-S'],
-            more_mpmap_opts = more_mpmap_opts
+            more_mpmap_opts = more_mpmap_opts,
+            force_outstore = self.force_outstore
         )
         
         # Make the context
@@ -628,7 +660,7 @@ class VGCITest(TestCase):
         mapeval_options.fasta = make_url(fasta_path)
         mapeval_options.index_bases = [make_url(x) for x in test_index_bases]
         mapeval_options.gam_names = test_names
-        mapeval_options.gam_input_reads = make_url(os.path.join(out_store, 'sim.gam'))
+        mapeval_options.fastq = [make_url(os.path.join(out_store, 'sim.fq.gz'))]
         # We have 150 bp reads reduced to a point position, at a resolution of
         # only the nearest 100 bp (on the primary graph). How close do two such
         # point positions need to be to say the read is in the right place?
@@ -655,11 +687,13 @@ class VGCITest(TestCase):
                                      plan.gcsa_file_ids,
                                      plan.gbwt_file_ids,
                                      plan.id_range_file_ids,
+                                     plan.snarl_file_ids,
                                      plan.vg_file_ids, 
                                      plan.gam_file_ids, 
                                      plan.reads_gam_file_id,
                                      None,
                                      None,
+                                     plan.reads_fastq_file_ids,
                                      plan.fasta_file_id, 
                                      plan.bwa_index_ids, 
                                      plan.bam_file_ids,
@@ -1170,8 +1204,8 @@ class VGCITest(TestCase):
         if True:
             # compute the xg index from scratch
             chrom, offset = self._bakeoff_coords(region)        
-            self._toil_vg_index(str(chrom), vg_path, None, None,
-                                '--skip_gcsa', tag, '{}-{}'.format(baseline_graph, region))
+            self._toil_vg_index(str(chrom), vg_path, None, "SKIP",
+                                None, tag, '{}-{}'.format(baseline_graph, region))
             xg_path = os.path.join(self._outstore(tag), '{}-{}'.format(baseline_graph, region) + '.xg')        
 
             test_index_bases = []
@@ -1291,7 +1325,7 @@ class VGCITest(TestCase):
                            sim_opts='-d 0.01 -p 1000 -v 75.0 -S 5 -I',
                            sim_fastq=self._input('platinum_NA12878_MHC.fq.gz'))
 
-    @timeout_decorator.timeout(1200)
+    @timeout_decorator.timeout(3000)
     def test_sim_mhc_snp1kg_mpmap(self):
         """ multipath mapper test, which is a smaller version of above.  we catch all errors
         so jenkins doesn't report failures.  vg is run only in single ended with multipath on
@@ -1306,7 +1340,7 @@ class VGCITest(TestCase):
                            sim_fastq=self._input('platinum_NA12878_MHC.fq.gz'),
                            more_mpmap_opts=['-u 8'])
 
-    @timeout_decorator.timeout(1800)
+    @timeout_decorator.timeout(4000)
     def test_sim_yeast_cactus(self):
         """ Yeast test based on the cactus graphs.  Reads are simulated from the SK1 path
         of the full graph.  The other graphs are made from this graph using vg mod:

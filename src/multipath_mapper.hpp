@@ -21,11 +21,18 @@
 #include "snarls.hpp"
 #include "haplotypes.hpp"
 
-#include <structures/suffix_tree.hpp>
+#include "algorithms/extract_containing_graph.hpp"
+#include "algorithms/extract_connecting_graph.hpp"
+#include "algorithms/extract_extending_graph.hpp"
+#include "algorithms/topological_sort.hpp"
+#include "algorithms/weakly_connected_components.hpp"
+
+#include <structures/union_find.hpp>
 #include <gbwt/gbwt.h>
 
 using namespace std;
 using namespace haplo;
+using namespace structures;
 
 namespace vg {
 
@@ -39,7 +46,7 @@ namespace vg {
         ////////////////////////////////////////////////////////////////////////
     
         MultipathMapper(xg::XG* xg_index, gcsa::GCSA* gcsa_index, gcsa::LCPArray* lcp_array,
-                        gbwt::GBWT* gbwt = nullptr, SnarlManager* snarl_manager = nullptr);
+                        haplo::ScoreProvider* haplo_score_provider = nullptr, SnarlManager* snarl_manager = nullptr);
         ~MultipathMapper();
         
         /// Map read in alignment to graph and make multipath alignments.
@@ -55,11 +62,13 @@ namespace vg {
                                   vector<pair<MultipathAlignment, MultipathAlignment>>& multipath_aln_pairs_out,
                                   vector<pair<Alignment, Alignment>>& ambiguous_pair_buffer,
                                   size_t max_alt_mappings);
-        
-        /// Debugging function to check that multipath alignment meets the formalism's basic
-        /// invariants. Returns true if multipath alignment is valid, else false. Does not
-        /// validate alignment score.
-        bool validate_multipath_alignment(const MultipathAlignment& multipath_aln) const;
+                                  
+        /// Given a mapped MultipathAlignment, reduce it to up to
+        /// max_alt_mappings + 1 nonoverlapping single path alignments, with
+        /// mapping qualities accounting for positional uncertainty between
+        /// them.
+        /// Even if the read is unmapped, there will always be at least one (possibly score 0) output alignment.
+        void reduce_to_single_path(const MultipathAlignment& multipath_aln, vector<Alignment>& alns_out, size_t max_alt_mappings) const;
         
         /// Sets the minimum clustering MEM length to the approximate length that a MEM would have to be to
         /// have at most the given probability of occurring in random sequence of the same size as the graph
@@ -88,8 +97,9 @@ namespace vg {
         size_t secondary_rescue_attempts = 4;
         double secondary_rescue_score_diff = 1.0;
         double mapq_scaling_factor = 1.0 / 4.0;
+        // There must be a ScoreProvider provided, and a positive population_max_paths, if this is true
         bool use_population_mapqs = false;
-        size_t population_max_paths = 1;
+        size_t population_max_paths = 10;
         // Note that, like the haplotype scoring code, we work with recombiantion penalties in exponent form.
         double recombination_penalty = 9 * 2.3;
         size_t rescue_only_min = 128;
@@ -221,6 +231,9 @@ namespace vg {
         /// Remove the full length bonus from all source or sink subpaths that received it
         void strip_full_length_bonuses(MultipathAlignment& mulipath_aln) const;
         
+        /// Compute a mapping quality from a list of scores, using the selected method.
+        int32_t compute_raw_mapping_quality_from_scores(const vector<double>& scores, MappingQualityMethod mapq_method) const;
+        
         /// Sorts mappings by score and store mapping quality of the optimal alignment in the MultipathAlignment object
         void sort_and_compute_mapping_quality(vector<MultipathAlignment>& multipath_alns, MappingQualityMethod mapq_method) const;
         
@@ -281,73 +294,7 @@ namespace vg {
         // a memo for the transcendental p-value function (thread local to maintain threadsafety)
         static thread_local unordered_map<pair<size_t, size_t>, double> p_value_memo;
     };
-    
-    // TODO: put in MultipathAlignmentGraph namespace
-    class ExactMatchNode {
-    public:
-        string::const_iterator begin;
-        string::const_iterator end;
-        Path path;
         
-        // pairs of (target index, path length)
-        vector<pair<size_t, size_t>> edges;
-    };
-    
-    // TODO: put in MultipathMapper namespace
-    class MultipathAlignmentGraph {
-    public:
-        
-        /// Construct a graph of the reachability between MEMs in a DAG-ified graph. Removes redundant
-        /// sub-MEMs. Assumes that the cluster is sorted by primarily length and secondarily lexicographically
-        /// by read interval. Optionally cuts snarl interiors from the paths and splits nodes accordingly
-        MultipathAlignmentGraph(VG& vg, const MultipathMapper::memcluster_t& hits,
-                                const unordered_map<id_t, pair<id_t, bool>>& projection_trans, gcsa::GCSA* gcsa = nullptr,
-                                SnarlManager* cutting_snarls = nullptr, int64_t max_snarl_cut_size = 5);
-        
-        ~MultipathAlignmentGraph();
-        
-        /// Fills input vector with node indices of a topological sort
-        void topological_sort(vector<size_t>& order_out);
-        
-        /// Removes all transitive edges from graph (reduces to minimum equivalent graph)
-        /// Note: reorders internal representation of adjacency lists
-        void remove_transitive_edges(const vector<size_t>& topological_order);
-        
-        /// Removes nodes and edges that are not part of any path that has an estimated score
-        /// within some amount of the highest scoring path
-        void prune_to_high_scoring_paths(const Alignment& alignment, const BaseAligner* aligner,
-                                         double MultipathAlignmentGraph, const vector<size_t>& topological_order);
-        
-        /// Reorders adjacency list representation of edges so that they follow the indicated
-        /// ordering of their target nodes
-        void reorder_adjacency_lists(const vector<size_t>& order);
-        
-        /// Nodes representing walked MEMs in the graph
-        vector<ExactMatchNode> match_nodes;
-        
-    private:
-        
-        /// Walk out MEMs into match nodes and filter out redundant sub-MEMs
-        void create_match_nodes(VG& vg, const MultipathMapper::memcluster_t& hits,
-                                const unordered_map<id_t, pair<id_t, bool>>& projection_trans,
-                                const unordered_multimap<id_t, pair<id_t, bool>>& injection_trans);
-        
-        /// Identifies runs of exact matches that are sub-maximal because they hit the order of the GCSA
-        /// index and merges them into a single node, assumes that match nodes are sorted by length and
-        /// then lexicographically by read interval, does not update edges
-        void collapse_order_length_runs(VG& vg, gcsa::GCSA* gcsa);
-        
-        /// Cut the interior of snarls out of anchoring paths unless they are longer than the
-        /// max cut size
-        void resect_snarls_from_paths(SnarlManager* cutting_snarls, const unordered_map<id_t, pair<id_t, bool>>& projection_trans,
-                                      int64_t max_snarl_cut_size);
-        
-        /// Add edges between reachable nodes and split nodes at overlaps
-        void add_reachability_edges(VG& vg, const MultipathMapper::memcluster_t& hits,
-                                    const unordered_map<id_t, pair<id_t, bool>>& projection_trans,
-                                    const unordered_multimap<id_t, pair<id_t, bool>>& injection_trans);
-        
-    };
 }
 
 

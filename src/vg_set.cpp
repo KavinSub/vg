@@ -74,13 +74,12 @@ int64_t VGset::merge_id_space(void) {
 }
 
 void VGset::to_xg(xg::XG& index, bool store_threads) {
-    map<string, Path> dummy;
     // Nothing matches the default-constructed regex, so nothing will ever be
     // sent to the map.
-    to_xg(index, store_threads, regex(), dummy);
+    to_xg(index, store_threads, regex());
 }
 
-void VGset::to_xg(xg::XG& index, bool store_threads, const regex& paths_to_take, map<string, Path>& removed_paths) {
+void VGset::to_xg(xg::XG& index, bool store_threads, const regex& paths_to_take, map<string, Path>* removed_paths) {
     
     // We need to sort out the mappings from different paths by rank. This maps
     // from path anme and then rank to Mapping.
@@ -95,6 +94,10 @@ void VGset::to_xg(xg::XG& index, bool store_threads, const regex& paths_to_take,
             // Load chunks from all the files and pass them into XG.
             std::ifstream in(name);
             
+            if (name == "-"){
+                if (!in) throw ifstream::failure("vg_set: cannot read from stdin. Failed to open " + name);
+            }
+            
             if (!in) throw ifstream::failure("failed to open " + name);
             
             function<void(Graph&)> handle_graph = [&](Graph& graph) {
@@ -102,35 +105,11 @@ void VGset::to_xg(xg::XG& index, bool store_threads, const regex& paths_to_take,
                 cerr << "Got chunk of " << name << "!" << endl;
 #endif
 
-                // We'll move all the paths into one of these.
+                // We'll move all the paths into one of these (if removed_paths is not null)
                 std::list<Path> paths_taken;
-                std::list<Path> paths_kept;
 
-                // Filter out matching paths
-                for(size_t i = 0; i < graph.path_size(); i++) {
-                    if(regex_match(graph.path(i).name(), paths_to_take)) {
-                        // We need to take this path
-#ifdef debug
-                        cerr << "Path " << graph.path(i).name() << " matches regex. Removing." << endl;
-#endif
-                        paths_taken.emplace_back(move(*graph.mutable_path(i)));
-                    } else {
-                        // We need to keep this path
-                        paths_kept.emplace_back(move(*graph.mutable_path(i)));
-#ifdef debug
-                        cerr << "Path " << graph.path(i).name() << " does not match regex. Keeping." << endl;
-#endif
-                    }
-                }
-                
-                // Clear the graph's paths and copy back only the ones that were
-                // kept. I don't think there's a good way to leave an entry and
-                // mark it not real somehow.
-                graph.clear_path();
-                for(Path& path : paths_kept) {
-                    // Move all the paths we keep back.
-                    *(graph.add_path()) = move(path);
-                }
+                // Remove the matching paths.
+                remove_paths(graph, paths_to_take, removed_paths ? &paths_taken : nullptr);
 
                 // Sort out all the mappings from the paths we pulled out
                 for(Path& path : paths_taken) {
@@ -152,7 +131,7 @@ void VGset::to_xg(xg::XG& index, bool store_threads, const regex& paths_to_take,
                         }
                         
                         // Move the mapping into place
-                        mappings[path.name()][mapping.rank()] = move(mapping);
+                        mappings[path.name()][mapping.rank()] = mapping;
                     }
                 }
 
@@ -170,11 +149,11 @@ void VGset::to_xg(xg::XG& index, bool store_threads, const regex& paths_to_take,
                 
                 for(auto& rank_and_mapping : kv.second) {
                     // Put in all the mappings. Ignore the rank since thay're already marked with and sorted by rank.
-                    *path.add_mapping() = move(rank_and_mapping.second);
+                    *path.add_mapping() = rank_and_mapping.second;
                 }
                 
                 // Now the Path is rebuilt; stick it in the big output map.
-                removed_paths[path.name()] = move(path);
+                (*removed_paths)[path.name()] = path;
             }
             
 #ifdef debug
@@ -195,6 +174,11 @@ void VGset::for_each_kmer_parallel(int kmer_size, const function<void(const kmer
 
 void VGset::write_gcsa_kmers_ascii(ostream& out, int kmer_size,
                                    id_t head_id, id_t tail_id) {
+    if (filenames.size() > 1 && (head_id == 0 || tail_id == 0)) {
+        id_t max_id = get_max_id(); // expensive, as we'll stream through all the files
+        head_id = max_id + 1;
+        tail_id = max_id + 2;
+    }
 
     // When we're sure we know what this kmer instance looks like, we'll write
     // it out exactly once. We need the start_end_id actually used in order to
@@ -215,34 +199,45 @@ void VGset::write_gcsa_kmers_ascii(ostream& out, int kmer_size,
 }
 
 // writes to a specific output stream
-void VGset::write_gcsa_kmers_binary(ostream& out, int kmer_size,
+void VGset::write_gcsa_kmers_binary(ostream& out, int kmer_size, size_t& size_limit,
                                     id_t head_id, id_t tail_id) {
     if (filenames.size() > 1 && (head_id == 0 || tail_id == 0)) {
         id_t max_id = get_max_id(); // expensive, as we'll stream through all the files
         head_id = max_id + 1;
         tail_id = max_id + 2;
     }
+
+    size_t total_size = 0;
     for_each([&](VG* g) {
-            // set up the graph with the head/tail nodes
-            Node* head_node = nullptr; Node* tail_node = nullptr;
-            g->add_start_end_markers(kmer_size, '#', '$', head_node, tail_node, head_id, tail_id);
-            write_gcsa_kmers(*g, kmer_size, out, head_id, tail_id);
-        });
+        // set up the graph with the head/tail nodes
+        Node* head_node = nullptr; Node* tail_node = nullptr;
+        g->add_start_end_markers(kmer_size, '#', '$', head_node, tail_node, head_id, tail_id);
+        size_t current_bytes = size_limit - total_size;
+        write_gcsa_kmers(*g, kmer_size, out, current_bytes, head_id, tail_id);
+        total_size += current_bytes;
+    });
+    size_limit = total_size;
 }
 
 // writes to a set of temp files and returns their names
-vector<string> VGset::write_gcsa_kmers_binary(int kmer_size,
+vector<string> VGset::write_gcsa_kmers_binary(int kmer_size, size_t& size_limit,
                                               id_t head_id, id_t tail_id) {
+    if (filenames.size() > 1 && (head_id == 0 || tail_id == 0)) {
+        id_t max_id = get_max_id(); // expensive, as we'll stream through all the files
+        head_id = max_id + 1;
+        tail_id = max_id + 2;
+    }
+
     vector<string> tmpnames;
+    size_t total_size = 0;
     for_each([&](VG* g) {
-            Node* head_node = nullptr; Node* tail_node = nullptr;
-            g->add_start_end_markers(kmer_size, '#', '$', head_node, tail_node, head_id, tail_id);
-            tmpnames.push_back(
-                write_gcsa_kmers_to_tmpfile(*g,
-                                            kmer_size,
-                                            head_id,
-                                            tail_id));
-        });
+        Node* head_node = nullptr; Node* tail_node = nullptr;
+        g->add_start_end_markers(kmer_size, '#', '$', head_node, tail_node, head_id, tail_id);
+        size_t current_bytes = size_limit - total_size;
+        tmpnames.push_back(write_gcsa_kmers_to_tmpfile(*g, kmer_size, current_bytes, head_id, tail_id));
+        total_size += current_bytes;
+    });
+    size_limit = total_size;
     return tmpnames;
 }
 

@@ -13,7 +13,7 @@
 #include "../vg.hpp"
 #include "../stream.hpp"
 #include "../utility.hpp"
-#include "../mapper.hpp"
+#include "../surjector.hpp"
 
 using namespace std;
 using namespace vg;
@@ -28,10 +28,8 @@ void help_surject(char** argv) {
          << "    -t, --threads N         number of threads to use" << endl
          << "    -p, --into-path NAME    surject into this path (many allowed, default: all in xg)" << endl
          << "    -F, --into-paths FILE   surject into nonoverlapping path names listed in FILE (one per line)" << endl
-         << "    -n, --context-depth N   expand this many steps when collecting graph for surjection (default: 3)" << endl
          << "    -i, --interleaved       GAM is interleaved paired-ended, so when outputting HTS formats, pair reads" << endl
          << "    -c, --cram-output       write CRAM to stdout" << endl
-         << "    -S, --min-softclip N    emit softclips of less than or equal to this length as matches [4]" << endl
          << "    -b, --bam-output        write BAM to stdout" << endl
          << "    -s, --sam-output        write SAM to stdout" << endl
          << "    -C, --compression N     level for compression [0-9]" << endl;
@@ -53,8 +51,6 @@ int main_surject(int argc, char** argv) {
     bool interleaved = false;
     string header_file;
     int compress_level = 9;
-    int context_depth = 3;
-    int min_softclip = 4;
 
     int c;
     optind = 2; // force optind past command positional argument
@@ -73,13 +69,11 @@ int main_surject(int argc, char** argv) {
             {"sam-output", no_argument, 0, 's'},
             {"header-from", required_argument, 0, 'H'},
             {"compress", required_argument, 0, 'C'},
-            {"context-depth", required_argument, 0, 'n'},
-            {"min-softclip", required_argument, 0, 'S'},
             {0, 0, 0, 0}
         };
 
         int option_index = 0;
-        c = getopt_long (argc, argv, "hx:p:F:P:icbsH:C:t:n:S:",
+        c = getopt_long (argc, argv, "hx:p:F:P:icbsH:C:t:",
                 long_options, &option_index);
 
         // Detect the end of the options.
@@ -134,14 +128,6 @@ int main_surject(int argc, char** argv) {
             compress_level = atoi(optarg);
             break;
 
-        case 'n':
-            context_depth = atoi(optarg);
-            break;
-
-        case 'S':
-            min_softclip = atoi(optarg);
-            break;
-
         case 'h':
         case '?':
             help_surject(argv);
@@ -187,31 +173,30 @@ int main_surject(int argc, char** argv) {
         auto name = xgidx->path_name(i);
         path_length[name] = xgidx->path_length(name);
     }
-
+    
     int thread_count = get_thread_count();
-    vector<Mapper*> mapper;
-    mapper.resize(thread_count);
-    for (int i = 0; i < thread_count; ++i) {
-        Mapper* m = new Mapper(xgidx, nullptr, nullptr);
-        m->context_depth = context_depth;
-        mapper[i] = m;
+    vector<Surjector*> surjectors(thread_count);
+    for (int i = 0; i < surjectors.size(); i++) {
+        surjectors[i] = new Surjector(xgidx);
     }
 
     if (input_type == "gam") {
         if (output_type == "gam") {
-            int thread_count = get_thread_count();
             vector<vector<Alignment> > buffer;
             buffer.resize(thread_count);
-            function<void(Alignment&)> lambda = [&xgidx, &path_names, &buffer, &mapper](Alignment& src) {
+            function<void(Alignment&)> lambda = [&xgidx, &path_names, &buffer, &surjectors](Alignment& src) {
                 int tid = omp_get_thread_num();
-                Alignment surj;
                 // Since we're outputting full GAM, we ignore all this info
                 // about where on the path the alignment falls. But we need to
                 // provide the space to the surject call anyway.
                 string path_name;
                 int64_t path_pos;
                 bool path_reverse;
-                buffer[tid].push_back(mapper[tid]->surject_alignment(src, path_names, path_name, path_pos, path_reverse));
+                buffer[tid].push_back(surjectors[omp_get_thread_num()]->path_anchored_surject(src,
+                                                                                              path_names,
+                                                                                              path_name,
+                                                                                              path_pos,
+                                                                                              path_reverse));
                 stream::write_buffered(cout, buffer[tid], 100);
             };
             get_input_file(file_name, [&](istream& in) {
@@ -270,7 +255,11 @@ int main_surject(int argc, char** argv) {
                 // reads need to come out with a 0 1-based position.
                 int64_t path_pos = -1; 
                 bool path_reverse = false;
-                auto surj = mapper[omp_get_thread_num()]->surject_alignment(src, path_names, path_name, path_pos, path_reverse);
+                auto surj = surjectors[omp_get_thread_num()]->path_anchored_surject(src,
+                                                                                    path_names,
+                                                                                    path_name,
+                                                                                    path_pos,
+                                                                                    path_reverse);
                 // Always use the surjected alignment, even if it surjects to unmapped.
                 
                 if (!hdr && !surj.read_group().empty() && !surj.sample_name().empty()) {
@@ -361,11 +350,11 @@ int main_surject(int argc, char** argv) {
                                     string cigar1 = "", cigar2 = "";
                                     if (name1 != "") {
                                         size_t path_len1 = xgidx->path_length(name1);
-                                        cigar1 = cigar_against_path(surj1, reverse1, pos1, path_len1, min_softclip);
+                                        cigar1 = cigar_against_path(surj1, reverse1, pos1, path_len1, 0);
                                     }
                                     if (name2 != "") {
                                         size_t path_len2 = xgidx->path_length(name2);
-                                        cigar2 = cigar_against_path(surj2, reverse2, pos2, path_len2, min_softclip);
+                                        cigar2 = cigar_against_path(surj2, reverse2, pos2, path_len2, 0);
                                     }
                                     
                                     // TODO: compute template length based on
@@ -480,7 +469,7 @@ int main_surject(int argc, char** argv) {
                                 string cigar = "";
                                 if (name != "") {
                                     size_t path_len = xgidx->path_length(name);
-                                    cigar = cigar_against_path(surj, reverse, pos, path_len, min_softclip);    
+                                    cigar = cigar_against_path(surj, reverse, pos, path_len, 0);
                                 }
                                 
                                 // Create and write a single unpaired BAM record
@@ -522,6 +511,10 @@ int main_surject(int argc, char** argv) {
         }
     }
     cout.flush();
+    
+    for (Surjector* surjector : surjectors) {
+        delete surjector;
+    }
 
     return 0;
 }
