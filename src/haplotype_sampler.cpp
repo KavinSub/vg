@@ -1,8 +1,18 @@
+#include <time.h>
+#include <algorithm>
+#include <math.h>
+#include <iostream>
+#include <fstream>
+#include <random>
+
 #include "haplotype_sampler.hpp"
 #include "handle.hpp"
 #include "snarls.hpp"
 #include "multipath_alignment.hpp"
 #include "vg.hpp"
+#include "nodetraversal.hpp"
+#include "phased_genome.hpp"
+#include "position.hpp"
 
 using namespace std;
 using namespace vg;
@@ -32,11 +42,10 @@ CountGraph count_paths(DirectedGraph&);
 vector<double> get_distribution(CountGraph&, DirectedGraph&, int);
 void multipath_node_ids(const MultipathAlignment&, set<int>&);
 map<MultipathAlignment*, set<int>> construct_node_map(vector<MultipathAlignment>&);
-map<int, set<Snarl*>> construct_node_snarl_map(SnarlManager*, VG*);
-map<Snarl*, set<MultipathAlignment*>> construct_snarl_alignment_map(vector<MultipathAlignment>&, map<int, set<Snarl*>>&, map<MultipathAlignment*, set<int>>&);
+map<int, set<const Snarl*>> construct_node_snarl_map(SnarlManager*, VG*);
+map<const Snarl*, set<MultipathAlignment*>> construct_snarl_alignment_map(vector<MultipathAlignment>&, map<int, set<const Snarl*>>&, map<MultipathAlignment*, set<int>>&);
 
-
-list<Visit> sample_path(Snarl& snarl, HandleGraph* graph){
+list<Visit> sample_path(const Snarl& snarl, HandleGraph* graph){
 	DirectedGraph digraph = build_graph(snarl, graph);
 	CountGraph cgraph = count_paths(digraph);
 
@@ -138,16 +147,122 @@ bool in_sequence(Snarl snarl, list<Visit> sequence){
 
 // [NAIVE]
 // Selects a random top level snarl
-Snarl random_snarl(SnarlManager* manager){
+const Snarl* random_snarl(SnarlManager* manager){
 	vector<const Snarl*> snarls = manager -> children_of(nullptr);
 	int index = rand() % snarls.size();
-	return *snarls[index];
+	return snarls[index];
 }
 
-map<Snarl*, set<MultipathAlignment*>> construct_snarl_map(SnarlManager* snarl_manager, vector<MultipathAlignment>& mp, VG* graph){
+const Snarl* random_snarl(vector<const Snarl*> &snarls){
+	int index = rand() % snarls.size();
+	return snarls[index];
+}
+
+map<const Snarl*, set<MultipathAlignment*>> construct_snarl_map(SnarlManager* snarl_manager, vector<MultipathAlignment>& mp, VG* graph){
 	map<MultipathAlignment*, set<int>> mp_map = construct_node_map(mp);
-	map<int, set<Snarl*>> id_map = construct_node_snarl_map(snarl_manager, graph);
+	map<int, set<const Snarl*>> id_map = construct_node_snarl_map(snarl_manager, graph);
 	return construct_snarl_alignment_map(mp, id_map, mp_map);
+}
+
+// Make sure to call before doing anything else here
+void initialize_sampler(){
+	srand(time(NULL));
+}
+
+// Naive sampling using random walk metropolis hastings. Proposal distribution is symmetric.
+// n := number of samples
+// out := file to write samples to
+void naive_sampling(int n, string file, SnarlManager* snarl_manager, vector<MultipathAlignment>& mp, VG* graph, PhasedGenome &p){
+	// [0] Setup output file
+	ofstream outfile;
+	outfile.open(file);
+
+	default_random_engine generator;
+	generator.seed(time(NULL));
+	uniform_real_distribution<double> distribution(0.0,1.0);
+
+	// [1] Construct snarl -> multipath alignment map
+	map<const Snarl*, set<MultipathAlignment*>> sma_map = construct_snarl_map(snarl_manager, mp, graph);
+
+	// [2] Generate random walks
+	list<Visit> walk_a = random_sequence(snarl_manager, graph);
+	list<Visit> walk_b = random_sequence(snarl_manager, graph);
+
+	// [a] Set alleles
+	// [i] Create list of node traversals
+	list<NodeTraversal> traversals_a;
+	list<NodeTraversal> traversals_b;
+	for(Visit v: walk_a) traversals_a.push_back(to_node_traversal(v, *graph));
+	for(Visit v: walk_b) traversals_b.push_back(to_node_traversal(v, *graph));	
+
+	// [ii] Add haplotypes
+	int haplotype_a = p.add_haplotype(traversals_a.begin(), traversals_a.end());
+	int haplotype_b = p.add_haplotype(traversals_b.begin(), traversals_b.end());
+	p.build_indices();
+
+
+	// [b] Get vector of top level snarls
+	vector<const Snarl*> tsnarls = snarl_manager -> children_of(nullptr);
+
+	for(int i = 0; i < n; i++){
+
+		// [3] Generate candidate subsequences
+		const Snarl *snarl = random_snarl(tsnarls);
+		list<Visit> subsequence_a = sample_path(*snarl, graph); // Naive sampling operation
+		list<Visit> subsequence_b = sample_path(*snarl, graph);
+
+		// [4] Acceptance probability
+		set<MultipathAlignment*> alignments = sma_map[snarl];
+
+		// [a] Calculate current likelihood
+		float current_likelihood = 0;
+		for(MultipathAlignment* algn: alignments) current_likelihood += p.optimal_score_on_genome(*algn, *graph);
+
+		// [b] Get current alleles
+		vector<NodeTraversal> current_allele_a = p.get_allele(*snarl, haplotype_a);
+		vector<NodeTraversal> current_allele_b = p.get_allele(*snarl, haplotype_b);
+
+		// // [c] Set alleles
+		vector<NodeTraversal> candidate_allele_a;
+		vector<NodeTraversal> candidate_allele_b;
+
+		unsigned int j = 0;
+		for(Visit visit: subsequence_a){
+			if(j > 0 && j < subsequence_a.size() - 1) candidate_allele_a.push_back(to_node_traversal(visit, *graph));
+			j++;
+		}
+
+		j = 0;
+		for(Visit visit: subsequence_b){
+			if(j > 0 && j < subsequence_b.size() - 1) candidate_allele_b.push_back(to_node_traversal(visit, *graph));
+			j++;
+		}
+
+		p.set_allele(*snarl, candidate_allele_a.begin(), candidate_allele_a.end(), haplotype_a);
+		p.set_allele(*snarl, candidate_allele_b.begin(), candidate_allele_b.end(), haplotype_b);
+
+		// [d] Compute candidate likelihood
+		float candidate_likelihood = 0;
+		for(MultipathAlignment* algn: alignments) candidate_likelihood += p.optimal_score_on_genome(*algn, *graph);
+
+		// [e] Compute acceptance probability
+		float alpha = candidate_likelihood == 0 ? 0 : min((float) 1, exp(candidate_likelihood - current_likelihood));
+		double comp = distribution(generator);
+
+		// [4] Determine next sample
+		if(comp <= alpha){
+			replace_subsequence(walk_a, subsequence_a);
+			replace_subsequence(walk_b, subsequence_b);
+		}else{
+			p.set_allele(*snarl, current_allele_a.begin(), current_allele_a.end(), 0);
+			p.set_allele(*snarl, current_allele_b.begin(), current_allele_b.end(), 1);
+		}
+
+		// [5] Write sample to file
+		outfile << "iteration: " << i << ", probability: " << alpha << ", candidate likelihood: " << exp(candidate_likelihood - current_likelihood) << endl;
+	}
+
+
 }
 
 // ********************************************************************************
@@ -369,27 +484,27 @@ map<MultipathAlignment*, set<int>> construct_node_map(vector<MultipathAlignment>
     return mp_map;
 }
 
-map<int, set<Snarl*>> construct_node_snarl_map(SnarlManager* snarl_manager, VG* graph){
-	map<int, set<Snarl*>> id_map;
+map<int, set<const Snarl*>> construct_node_snarl_map(SnarlManager* snarl_manager, VG* graph){
+	map<int, set<const Snarl*>> id_map;
 
 	snarl_manager -> for_each_snarl_preorder([&](const Snarl* s){
 		pair<unordered_set<Node*>, unordered_set<Edge*>> p = snarl_manager -> deep_contents(s, *graph, true);
 		unordered_set<Node*> nodes = p.first;
 		for(unordered_set<Node*>::const_iterator it = nodes.begin(); it != nodes.end(); it++){
 			int node_id = (*it) -> id();
-			id_map[node_id].insert((Snarl*) s);
+			id_map[node_id].insert((const Snarl*) s);
 		}
 	});
 
 	return id_map;
 }
 
-map<Snarl*, set<MultipathAlignment*>> construct_snarl_alignment_map(vector<MultipathAlignment>& mp, map<int, set<Snarl*>> &id_map, map<MultipathAlignment*, set<int>> &mp_map){
-	map<Snarl*, set<MultipathAlignment*> > snarl_map;
+map<const Snarl*, set<MultipathAlignment*>> construct_snarl_alignment_map(vector<MultipathAlignment>& mp, map<int, set<const Snarl*>> &id_map, map<MultipathAlignment*, set<int>> &mp_map){
+	map<const Snarl*, set<MultipathAlignment*> > snarl_map;
 	for(int i = 0; i < mp.size(); i++){
     	set<int> nodes = mp_map[&mp[i]];
     	for(set<int>::const_iterator node = nodes.begin(); node != nodes.end(); node++){
-    		for(set<Snarl*>::const_iterator snarl = id_map[*node].begin(); snarl != id_map[*node].end(); snarl++){
+    		for(set<const Snarl*>::const_iterator snarl = id_map[*node].begin(); snarl != id_map[*node].end(); snarl++){
     			snarl_map[*snarl].insert(&mp[i]);
     		} 
     	}

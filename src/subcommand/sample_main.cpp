@@ -122,6 +122,10 @@ int main_sample(int argc, char** argv){
     PhasedGenome p(*snarl_manager);
     cout << "Constructed Phased Genome." << endl;
 
+
+    initialize_sampler();
+    naive_sampling(100, "endme.txt", snarl_manager, mp, graph, p);
+
 	return 0;
 }
 
